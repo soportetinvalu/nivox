@@ -5,6 +5,68 @@
 #include "nv_call.h"
 #include "nv_path.h"
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <pthread.h>
+
+/* Process-lifetime callback context: a late HAL notification cannot touch a
+ * freed route. Registration/refcount changes are non-RT and mutex serialized. */
+static _Atomic uint64_t topology_generation;
+static pthread_mutex_t watch_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned watch_users;
+static int watching[2];
+static const AudioObjectPropertyAddress watches[] = {
+    {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+    {kAudioHardwarePropertyServiceRestarted, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+};
+static OSStatus topology_changed(AudioObjectID object, UInt32 count,
+                                 const AudioObjectPropertyAddress *addresses, void *context) {
+    (void)object; (void)count; (void)addresses; (void)context;
+    atomic_fetch_add_explicit(&topology_generation, 1, memory_order_relaxed);
+    return noErr;
+}
+static void remove_watches(void) {
+    for (int i = 0; i < 2; i++)
+        if (watching[i] && AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL) == noErr)
+            watching[i] = 0;
+}
+static int acquire_watches(char *err, size_t n) {
+    pthread_mutex_lock(&watch_lock);
+    for (int i = 0; i < 2; i++) if (!watching[i]) {
+        OSStatus st = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL);
+        if (st != noErr) {
+            if (!watch_users) remove_watches();
+            pthread_mutex_unlock(&watch_lock);
+            snprintf(err, n, "CoreAudio device/restart listener registration failed: OSStatus %d", (int)st);
+            return -1;
+        }
+        watching[i] = 1;
+    }
+    watch_users++;
+    pthread_mutex_unlock(&watch_lock);
+    return 0;
+}
+static void release_watches(void) {
+    pthread_mutex_lock(&watch_lock);
+    if (--watch_users == 0) remove_watches();
+    pthread_mutex_unlock(&watch_lock);
+}
+typedef struct {
+    nv_path path;
+    char physical_uid[256];
+    int speaker;
+    nv_endpoint_state input, output;
+    uint64_t generation;
+} call_route;
+static int route_valid(void *ctx, void *route) {
+    (void)ctx;
+    call_route *r = route;
+    AudioObjectID physical = nv_device_for_uid(r->physical_uid);
+    AudioObjectID in = r->speaker ? nv_device_for_uid(NV_UID_SPEAKER_RETURN) : physical;
+    AudioObjectID out = r->speaker ? physical : nv_device_for_uid(NV_UID_MIC_FEED);
+    nv_endpoint_state input = nv_device_state(in, 1), output = nv_device_state(out, 0);
+    return r->generation == atomic_load_explicit(&topology_generation, memory_order_relaxed) &&
+           !nv_endpoint_changed(&r->input, &input) && !nv_endpoint_changed(&r->output, &output);
+}
 
 static int list(void *ctx, nv_call_device **out, size_t *count) {
     (void)ctx;
@@ -52,8 +114,12 @@ static int driver_ready(void *ctx) {
 }
 static void *open_route(void *ctx, int speaker, const char *uid, char *err, size_t n) {
     (void)ctx;
-    nv_path *p = calloc(1, sizeof *p);
-    if (!p) { snprintf(err, n, "Out of memory"); return NULL; }
+    call_route *r = calloc(1, sizeof *r);
+    if (!r) { snprintf(err, n, "Out of memory"); return NULL; }
+    if (acquire_watches(err, n)) { free(r); return NULL; }
+    r->speaker = speaker;
+    snprintf(r->physical_uid, sizeof r->physical_uid, "%s", uid);
+    r->generation = atomic_load_explicit(&topology_generation, memory_order_relaxed);
     AudioObjectID physical = nv_device_for_uid(uid);
     AudioObjectID in = speaker ? nv_device_for_uid(NV_UID_SPEAKER_RETURN) : physical;
     AudioObjectID out = speaker ? physical : nv_device_for_uid(NV_UID_MIC_FEED);
@@ -61,23 +127,29 @@ static void *open_route(void *ctx, int speaker, const char *uid, char *err, size
     /* Respect the hardware's existing IO buffer size, unlike the CLI's optional
      * best-effort buffer request. Strength 1 uses the existing -15 dB preset. */
     nv_path_options options = {1.f, 0, 10};
-    if (nv_path_open(p, speaker ? "speaker" : "mic", in, speaker ? 2 : 1, out, channels,
-                     &options, err, n) || nv_path_start(p, err, n)) {
-        nv_path_close(p); free(p); return NULL;
+    r->input = nv_device_state(in, 1); r->output = nv_device_state(out, 0);
+    if (nv_path_open(&r->path, speaker ? "speaker" : "mic", in, speaker ? 2 : 1, out, channels,
+                     &options, err, n) || nv_path_start(&r->path, err, n)) {
+        nv_path_close(&r->path); release_watches(); free(r); return NULL;
     }
-    return p;
+    if (!route_valid(NULL, r)) {
+        snprintf(err, n, "CoreAudio topology or endpoint changed while opening route");
+        nv_path_close(&r->path); release_watches(); free(r); return NULL;
+    }
+    return r;
 }
 static void close_route(void *ctx, void *route) {
     (void)ctx;
-    nv_path_close(route); free(route);
+    call_route *r = route;
+    nv_path_close(&r->path); release_watches(); free(r);
 }
 static void stats(void *ctx, void *route, nv_call_stats *out) {
     (void)ctx;
     nv_bridge_stats s = {0};
-    nv_bridge_get_stats(((nv_path *)route)->bridge, &s);
+    nv_bridge_get_stats(((call_route *)route)->path.bridge, &s);
     *out = (nv_call_stats){s.pushed, s.pulled, s.underruns, s.overflows, s.rejected_samples, s.primed};
 }
 nv_call *nv_call_create_mac(void) {
-    const nv_call_backend b = {list, driver_ready, open_route, close_route, stats};
+    const nv_call_backend b = {list, driver_ready, open_route, close_route, stats, route_valid};
     return nv_call_create(&b, NULL);
 }

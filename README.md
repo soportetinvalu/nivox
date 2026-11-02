@@ -8,7 +8,8 @@ Detener/salir pide confirmación: **sin bypass**, las llamadas que sigan usando
 Nivox pierden esas rutas hasta seleccionar dispositivos físicos. Suspender
 detiene el motor sin reanudación automática. Requiere instalar el driver
 Nivox por separado. Véase [integración y aceptación](docs/CALL_AUDIO_UI.md) y
-[arquitectura de llamadas](callaudio/README.md). La compilación Mac citada abajo
+[arquitectura de llamadas](callaudio/README.md). Integración sobre seguridad y pendientes:
+[recibo de candidata](docs/CALL_AUDIO_SAFE_INTEGRATION.md). La compilación Mac citada abajo
 corresponde únicamente al prototipo anterior, no verifica estos cambios.
 
 ## Prototipo A/B anterior (conservado en otra pestaña)

@@ -27,7 +27,7 @@ static int fail(nv_call *c, const char *message) {
     return -1;
 }
 nv_call *nv_call_create(const nv_call_backend *b, void *ctx) {
-    if (!b || !b->list || !b->driver_ready || !b->open || !b->close || !b->stats) return NULL;
+    if (!b || !b->list || !b->driver_ready || !b->open || !b->close || !b->stats || !b->route_valid) return NULL;
     nv_call *c = calloc(1, sizeof *c);
     if (c) { c->b = *b; c->context = ctx; }
     return c;
@@ -102,6 +102,9 @@ void nv_call_poll(nv_call *c, double now) {
         if (!d || d->rate != c->selected[i].rate || d->inputs != c->selected[i].inputs ||
             d->outputs != c->selected[i].outputs) {
             fail(c, "Dispositivo desconectado o formato cambiado. Ambas rutas se detuvieron; revisa la selección y vuelve a encender. No se cambia a los altavoces automáticamente."); return;
+        }
+        if (!c->b.route_valid(c->context, c->routes[i])) {
+            fail(c, "CoreAudio reiniciado o identidad/formato de ruta cambiado. Ambas rutas se detuvieron; revisa los dispositivos y vuelve a encender."); return;
         }
         nv_call_stats s = {0};
         c->b.stats(c->context, c->routes[i], &s);

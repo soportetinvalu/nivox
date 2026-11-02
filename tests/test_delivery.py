@@ -18,6 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from ci import icon_assets, export_sources
+from ci.call_audio_build import verify_audio_entitlement
 import build as recipe
 OUT: Path = ROOT / 'build/uninitialized-test-output'
 
@@ -122,6 +123,35 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn('App/Assets/Nivox-original.png', payload)
         self.assertIn('vendor/speexdsp-1.2.1.tar.gz', payload)
         self.assertFalse(any('build' in Path(p).parts or '.git' in Path(p).parts or '.env' in Path(p).parts for p in payload))
+
+    def test_safe_call_audio_export_complete(self):
+        payload = export_sources.collect_payload()
+        required = {'callaudio/core/nv_watch.h', 'callaudio/core/nv_signal.h',
+                    'callaudio/mac/audio-input.entitlements', 'callaudio/control/nv_call_ui.h',
+                    'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
+                    'callaudio/tests/test_installer.py', 'callaudio/tests/test_mac_clock.c',
+                    'callaudio/tests/test_call_mac_contract.c'}
+        self.assertTrue(required <= set(payload))
+
+    def test_source_manifest_matches_payload(self):
+        payload = export_sources.collect_payload()
+        manifest = json.loads((ROOT / 'source-manifest.json').read_text())
+        self.assertEqual(manifest, {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()})
+
+    def test_signed_entitlement_parser_positive_and_negative(self):
+        # Only the parser is tested here, not codesign or Apple's signature trust.
+        target = Path('synthetic-entitlement-fixture')
+        def fixture(ent):
+            return lambda cmd: 'diagnostic header\n' + plistlib.dumps(ent).decode()
+        self.assertTrue(verify_audio_entitlement(fixture({'com.apple.security.device.audio-input': True}), target))
+        for ent in [{}, {'com.apple.security.device.audio-input': False},
+                    {'com.apple.security.device.audio-input': 1},
+                    {'com.apple.security.device.audio-input': True, 'com.apple.security.cs.disable-library-validation': True}]:
+            with self.subTest(ent=ent), self.assertRaises(RuntimeError):
+                verify_audio_entitlement(fixture(ent), target)
+        for text in ['codesign succeeded', 'com.apple.security.device.audio-input=true', '<?xml invalid </plist>']:
+            with self.subTest(text=text), self.assertRaises(RuntimeError):
+                verify_audio_entitlement(lambda cmd: text, target)
 
     def test_symbolic_allowlist_file_rejected(self):
         f = self.fixture('symbolic-file')

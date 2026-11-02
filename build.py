@@ -15,7 +15,7 @@ import sys
 import tarfile
 from pathlib import Path
 from ci.icon_assets import validate_assets
-from ci.call_audio_build import build_app_library, test_control, CONTROL_SOURCES
+from ci.call_audio_build import build_app_library, test_control, CONTROL_SOURCES, verify_audio_entitlement
 
 HERE = Path(__file__).resolve().parent
 SHA = '8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d'
@@ -218,6 +218,7 @@ def main():
                 audit_macho(lib)
                 run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--entitlements', HERE / 'App/Entitlements.plist', app])
                 run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', app])
+                report['signed_audio_input'] = verify_audio_entitlement(run, app)
                 signature = run(['codesign', '--display', '--verbose=4', app])
                 if 'Signature=adhoc' not in signature:
                     raise RuntimeError('Expected ad hoc signature')
@@ -228,6 +229,7 @@ def main():
                 run(['ditto', '-x', '-k', package, extracted])
                 copy = extracted / app.name
                 run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', copy])
+                report['extracted_audio_input'] = verify_audio_entitlement(run, copy)
                 report['extracted_audit'] = audit_macho(copy / 'Contents/MacOS/Nivox')
                 if validate_assets(copy / 'Contents/Resources') != icon:
                     raise RuntimeError('Extracted icon validation failed')

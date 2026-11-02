@@ -24,7 +24,8 @@ una CLI suelta ni una simulación:
   solo al iniciar explícitamente; una solicitud pendiente se invalida al
   cerrar la ventana, cambiar de pestaña, detener o suspender. La comprobación
   por generación también impide reutilizar respuestas antiguas en la prueba A/B.
-- Desconexión, cambio de tasa/canales, pérdida del driver, muestras rechazadas,
+- Desconexión, cambio de ID/tasa/canales/buffer/formato físico, notificación de
+  dispositivos/reinicio CoreAudio (aunque conserve IDs), pérdida del driver, muestras rechazadas,
   fallo de consulta HAL o falta de progreso durante 5 s detienen ambas rutas.
   No hay reinicio automático. Underruns/overflows se muestran como aviso acumulado.
 - Error de apertura conserva el detalle del motor (`OSStatus` cuando existe)
@@ -71,7 +72,7 @@ python3 tests/test_call_audio.py --out build/call-ui-control
 python3 build.py --target linux --out build/call-ui-linux
 # Mac arm64 real: Nivox.app enlazada con CoreAudio y el motor (sin instalar driver)
 python3 build.py --target macapp --out build/call-ui-mac
-# Mac arm64 real: app + driver + CLI/E2E, ZIP y pkg solo del driver; no instala
+# Mac arm64 real: app + driver + CLI/E2E y ZIP protegido; PKG directo deshabilitado
 python3 callaudio/tools/build_callaudio.py --target mac --out build/callaudio-mac
 ```
 
@@ -101,6 +102,11 @@ concreta. Las guardas de fuente Swift también rechazan reintroducir el
 SwiftUI, audio físico ni compatibilidad con llamadas reales. El host de esta
 integración es Linux sin `swiftc` ni SDK de Apple. Estos controles quedan
 pendientes de la siguiente aceptación en Mac, no se sustituyen con mocks.
+
+## Integración sobre seguridad
+
+La candidata actual y sus límites están en [`CALL_AUDIO_SAFE_INTEGRATION.md`](CALL_AUDIO_SAFE_INTEGRATION.md).
+Los recibos siguientes son históricos de la rama UI, no verifican esta candidata.
 
 ## Evidencia de la integración anterior (conservada)
 

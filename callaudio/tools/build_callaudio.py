@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]  # repo root
 CA = ROOT / 'callaudio'
 sys.path.insert(0, str(ROOT))
-from ci.call_audio_build import test_control
+from ci.call_audio_build import test_control, verify_audio_entitlement
 SPEEX = ROOT / 'vendor/speexdsp-1.2.1.tar.gz'
 SPEEX_SHA = '8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d'
 ASPL = ROOT / 'vendor/libASPL-3.1.2.tar.gz'
@@ -206,6 +206,9 @@ def mac(run, out, report):
     app_out = out / 'app-build'
     run([sys.executable, ROOT / 'build.py', '--target', 'macapp', '--out', app_out])
     report['app_build'] = json.loads((app_out / 'report.json').read_text())
+    for key in ['ok', 'mac_compiled', 'archive_roundtrip_verified', 'signed_audio_input', 'extracted_audio_input']:
+        if report['app_build'].get(key) is not True:
+            raise RuntimeError(f'app build did not prove {key}')
     # ZIP (app + driver + tools + scripts + notices), re-verified after extraction.
     stage = out / 'Nivox-CallAudio'
     stage.mkdir()
@@ -223,6 +226,18 @@ def mac(run, out, report):
     run(['ditto', '-x', '-k', zip_path, ex])
     run(['codesign', '--verify', '--strict', '--verbose=2', ex / 'Nivox-CallAudio/NivoxAudio.driver'])
     run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', ex / 'Nivox-CallAudio/Nivox.app'])
+    extracted = ex / 'Nivox-CallAudio'
+    report['extracted_app_audio_input'] = verify_audio_entitlement(run, extracted / 'Nivox.app')
+    for name in tools:
+        binary = extracted / name
+        run(['codesign', '--verify', '--strict', binary])
+        audit_macho(run, binary)
+        verify_audio_entitlement(run, binary)
+    def hashes(folder):
+        return {str(p.relative_to(folder)): digest(p) for p in sorted(folder.rglob('*')) if p.is_file()}
+    if hashes(stage) != hashes(extracted):
+        raise RuntimeError('Call-audio ZIP round trip changed bytes')
+    report['archive_roundtrip_verified'] = True
     # Direct-payload PKG stays disabled: it bypasses protected replacement.
     report.update(zip_sha256=digest(zip_path), pkg_status='disabled: unsafe direct payload replacement',
                   signature='ad-hoc (not Developer ID, not notarized)')

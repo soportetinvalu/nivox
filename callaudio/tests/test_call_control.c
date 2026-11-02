@@ -11,7 +11,7 @@
 typedef struct {
     nv_call_device devices[3];
     nv_call_stats stats[2];
-    int ready, list_error, fail_route, opens, closes, live;
+    int ready, list_error, fail_route, opens, closes, live, invalid_route;
 } fixture;
 static int list(void *ctx, nv_call_device **out, size_t *n) {
     fixture *f = ctx;
@@ -33,12 +33,13 @@ static void close_route(void *ctx, void *r) {
     free(r); f->live--; f->closes++;
 }
 static void stats(void *ctx, void *route, nv_call_stats *s) { *s = ((fixture *)ctx)->stats[*(int *)route]; }
+static int route_valid(void *ctx, void *route) { return ((fixture *)ctx)->invalid_route != *(int *)route; }
 static nv_call *create(fixture *f) {
-    memset(f, 0, sizeof *f); f->ready = 1; f->fail_route = -1;
+    memset(f, 0, sizeof *f); f->ready = 1; f->fail_route = -1; f->invalid_route = -1;
     f->devices[0] = (nv_call_device){"physical.mic", "USB mic", 1, 0, 48000, 1, 1};
     f->devices[1] = (nv_call_device){"physical.output", "Headphones", 0, 2, 44100, 1, 1};
     f->devices[2] = (nv_call_device){"nivox.microphone.v1", "Virtual", 1, 2, 48000, 0, 1};
-    nv_call_backend b = {list, ready, open_route, close_route, stats};
+    nv_call_backend b = {list, ready, open_route, close_route, stats, route_valid};
     nv_call *c = nv_call_create(&b, f); assert(c); return c;
 }
 static void start(nv_call *c) {
@@ -125,6 +126,19 @@ static void test_route_changes(void) {
         destroy(c, &f);
     }
 }
+static void test_route_snapshot_failure(void) {
+    for (int route = 0; route < 2; route++) {
+        fixture f; nv_call *c = create(&f); start(c); progress(&f); nv_call_poll(c, .5);
+        assert(nv_call_state(c) == NV_CALL_RUNNING);
+        f.invalid_route = route; progress(&f); nv_call_poll(c, 1);
+        assert(nv_call_state(c) == NV_CALL_ERROR);
+        error(c, &f, "CoreAudio reiniciado"); assert(f.closes == 2);
+        f.invalid_route = -1; nv_call_poll(c, 2); assert(f.opens == 2);
+        start(c); assert(f.opens == 4); destroy(c, &f);
+    }
+    nv_call_backend b = {list, ready, open_route, close_route, stats, NULL};
+    assert(nv_call_create(&b, NULL) == NULL); /* missing guard fails closed */
+}
 static void test_catalog_failure(void) {
     fixture f; nv_call *c = create(&f); start(c); f.list_error = 1;
     nv_call_poll(c, 1); error(c, &f, "CoreAudio"); assert(!nv_call_driver_ready(c)); destroy(c, &f);
@@ -182,6 +196,7 @@ int main(void) {
     TEST(test_stall_startup_and_running); TEST(test_route_changes); TEST(test_catalog_failure);
     TEST(test_rejected_samples_and_gaps); TEST(test_destroy_active);
     TEST(test_ui_hide_keeps_call); TEST(test_ui_pending_permission_is_cancelled);
+    TEST(test_route_snapshot_failure);
     TEST(test_ui_sleep_stops_without_restart); TEST(test_ui_hidden_health_checks);
     printf("{\"ok\":true,\"tests\":%u,\"backend\":\"injected; not CoreAudio\"}\n", tests);
     return 0;

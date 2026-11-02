@@ -68,7 +68,9 @@ def main():
                                for name in ['App/CallAudio.swift', 'App/NoiseProbeApp.swift',
                                             'callaudio/control/nv_call.h', 'callaudio/control/nv_call_ui.h',
                                             'callaudio/control/nv_call.c', 'callaudio/tests/test_call_control.c',
-                                            'tests/test_call_audio.py']}}
+                                            'tests/test_call_audio.py', 'callaudio/mac/nv_call_mac.c',
+                                            'callaudio/tests/test_call_mac_contract.c', 'callaudio/core/nv_watch.h',
+                                            'ci/call_audio_build.py']}}
     with (out / 'commands.log').open('x') as log:
         def run(cmd):
             cmd = list(map(str, cmd))
@@ -82,6 +84,11 @@ def main():
                                                                        '-fno-omit-frame-pointer'])]:
                 directory = out / name; directory.mkdir()
                 report[name] = json.loads(test_control(run, directory, cc, flags).splitlines()[-1])
+                exe = directory / 'test_call_mac_contract'
+                run([cc, *flags, '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread',
+                     '-I' + str(ROOT / 'callaudio/core'), '-I' + str(ROOT / 'callaudio/control'),
+                     ROOT / 'callaudio/tests/test_call_mac_contract.c', ROOT / 'callaudio/control/nv_call.c', '-o', exe])
+                report[name]['mac_glue_fake_hal'] = json.loads(run([exe]).splitlines()[-1])
             # Counterprobe: removing callback readiness must turn the suite red.
             source = (ROOT / 'callaudio/control/nv_call.c').read_text()
             needle = 'c->state = ready ? NV_CALL_RUNNING : NV_CALL_STARTING;'
@@ -97,6 +104,37 @@ def main():
             assert proc.returncode != 0 and 'test_activity_required_on_both_paths' in proc.stderr, proc.stderr
             report['readiness_mutation_rejected'] = True
             report['mutation_returncode'] = proc.returncode
+            # Removing the required route-health check must fail the named case.
+            old = 'if (!c->b.route_valid(c->context, c->routes[i]))'
+            assert source.count(old) == 1
+            mutant.write_text(source.replace(old, 'if (0)'))
+            run([cc, '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I' + str(ROOT / 'callaudio/control'),
+                 ROOT / 'callaudio/tests/test_call_control.c', mutant, '-o', exe])
+            proc = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
+            log.write('route-health counterprobe\n' + proc.stdout + proc.stderr); log.flush()
+            assert proc.returncode != 0 and 'test_route_snapshot_failure' in proc.stderr, proc.stderr
+            report['route_health_mutation_rejected'] = True
+            glue = (ROOT / 'callaudio/mac/nv_call_mac.c').read_text()
+            report['mac_glue_mutations'] = []
+            for name, old, new, assertion in [
+                ('ignore_listener_error', 'if (st != noErr)', 'if (st != noErr && 0)', 'test_listener_failure_closed'),
+                ('ignore_restart', 'r->generation == atomic_load_explicit(&topology_generation, memory_order_relaxed) &&',
+                 '1 &&', 'test_restart_same_ids'),
+                ('ignore_input_snapshot', '!nv_endpoint_changed(&r->input, &input)',
+                 '(1 + 0 * nv_endpoint_changed(&r->input, &input))', 'test_endpoint_snapshot_changes'),
+            ]:
+                assert glue.count(old) == 1
+                path = out / (name + '.c'); path.write_text(glue.replace(old, new))
+                exe = out / name
+                run([cc, '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread',
+                     '-I' + str(ROOT / 'callaudio/core'), '-I' + str(ROOT / 'callaudio/control'),
+                     '-I' + str(ROOT / 'callaudio/mac'),
+                     '-DNV_CALL_MAC_SOURCE="' + str(path) + '"',
+                     ROOT / 'callaudio/tests/test_call_mac_contract.c', ROOT / 'callaudio/control/nv_call.c', '-o', exe])
+                proc = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
+                log.write(name + '\n' + proc.stdout + proc.stderr); log.flush()
+                assert proc.returncode != 0 and assertion in proc.stderr, proc.stderr
+                report['mac_glue_mutations'].append({'name': name, 'rejected': True, 'returncode': proc.returncode})
             # Exercise the same UI policy imported by Swift, with the production
             # controller, and require each unsafe policy mutation to fail by name.
             header = (ROOT / 'callaudio/control/nv_call_ui.h').read_text()

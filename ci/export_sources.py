@@ -31,6 +31,11 @@ FILES = [
     'callaudio/installer/postinstall', 'callaudio/tools/build_callaudio.py',
     'callaudio/README.md', 'callaudio/LICENSES.md', 'docs/CALL_AUDIO_UI.md', 'docs/CALL_AUDIO_UI_EVIDENCE.json',
     'vendor/libASPL-3.1.2.tar.gz', '.github/workflows/build-callaudio-arm64.yml',
+    'callaudio/core/nv_watch.h', 'callaudio/core/nv_signal.h', 'callaudio/mac/audio-input.entitlements',
+    'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
+    'callaudio/tests/test_mac_clock.c', 'callaudio/tests/test_installer.py',
+    'callaudio/tests/test_call_mac_contract.c',
+    'docs/CALL_AUDIO_SAFE_INTEGRATION.md', 'docs/CALL_AUDIO_SAFE_EVIDENCE.json',
 ]
 
 

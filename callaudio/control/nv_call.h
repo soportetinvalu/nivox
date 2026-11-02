@@ -28,6 +28,7 @@ typedef struct {
     void *(*open)(void *, int speaker, const char *physical_uid, char *, size_t);
     void (*close)(void *, void *);
     void (*stats)(void *, void *, nv_call_stats *);
+    int (*route_valid)(void *, void *); /* required: topology/endpoint snapshot still current */
 } nv_call_backend;
 nv_call *nv_call_create(const nv_call_backend *, void *context);
 nv_call *nv_call_create_mac(void);
