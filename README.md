@@ -2,7 +2,7 @@
 
 Entrega integrada de fuentes: branding Nivox e icono original aportado por el usuario, con **SpeexDSP 1.2.1 real**, estático y sin pesos. No incluye Neep, RNNoise, modelos, audio privado ni credenciales. No instala drivers, servicios ni dispositivos. La inferencia y el build local no necesitan descargar dependencias; GitHub Actions sí necesita red para checkout, herramientas y artifacts.
 
-**No se ha compilado ni ejecutado en macOS ni se ha ejecutado Actions.** El árbol está preparado para construir en un runner Darwin arm64 real, no es una app Mac acreditada. La verificación Linux y sus límites figuran en `docs/RESULTADOS.md`.
+**Compilación experimental verificada en macOS arm64:** [ejecución de GitHub Actions](https://github.com/soportetinvalu/nivox/actions/runs/41475856569), sobre el código `dccde6fa9ab44ad3bb7f6b841c45bb79fbc72875`. La interfaz y el micrófono aún no se han probado en una Mac de usuario. Los resultados anteriores de Linux figuran en `docs/RESULTADOS.md`.
 
 ## Alcance real
 
@@ -45,12 +45,12 @@ En un Mac Apple Silicon autorizado con herramientas Apple y Python >=3.12:
 python3 build.py --target macapp --out build/mac-arm64
 ```
 
-Receta: construir SpeexDSP estático, probar DSP, compilar smoke Swift/AVFoundation solo en RAM y app SwiftUI, validar icono obligatorio, copiar licencias, auditar Mach-O arm64/dependencias, firmar **ad hoc**, crear `Nivox-arm64-experimental.zip`, extraer y cotejar hashes/firma/arquitectura/icono. No abre GUI, no solicita TCC ni prueba dispositivos. El artifact futuro contiene `Nivox.app`; **no existe todavía una ejecución Mac acreditada**. Firma ad hoc no es Developer ID ni notarización, y no garantiza aceptación de Gatekeeper. No desactivar sus protecciones.
+Receta: construir SpeexDSP estático, probar DSP, compilar smoke Swift/AVFoundation solo en RAM y app SwiftUI, validar icono obligatorio, copiar licencias, auditar Mach-O arm64/dependencias, firmar **ad hoc**, crear `Nivox-arm64-experimental.zip`, extraer y cotejar hashes/firma/arquitectura/icono. La ejecución de Actions enlazada arriba produjo `Nivox.app` en Mac arm64, pero no abrió la interfaz ni probó micrófonos. Firma ad hoc no es Developer ID ni notarización, y no garantiza aceptación de Gatekeeper. No desactivar sus protecciones.
 
 ## Licencias y faltantes
 
 - Código propio MIT: `LICENSE`. Upstream/archivo fijado: `LICENSES.md`.
-- Arte aportado por el usuario: uso en esta entrega solicitado expresamente; **MIT no licencia el icono**. No se certifican titularidad ni derechos públicos de terceros: confirmarlos antes de publicar (`App/Assets/BRANDING.md`).
+- Arte aportado por el usuario: Christian confirmó el derecho a usarlo y compartirlo como parte de Nivox. **MIT no licencia el icono**; no se ha verificado independientemente la titularidad (`App/Assets/BRANDING.md`).
 - No hay evaluación nueva de voz humana, escucha validada, STOI/PESQ/WER ni garantía de tiempo real duro. La atenuación de ruido sintético no demuestra inteligibilidad. SpeexDSP puede producir artefactos o atenuar voz; ráfagas siguen siendo un límite conocido, no una calidad nuevamente medida aquí.
 - Llamadas, permisos reales, firma y aceptación: `docs/ACEPTACION_MAC.md`. Integración/procedencia: `docs/INTEGRACION.md`.
 

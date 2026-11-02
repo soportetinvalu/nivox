@@ -1,7 +1,7 @@
 {
   ".github/workflows/build-speex-arm64.yml": "39e33837b52c13550c17be612a1bee355d079b0fba97d771b775c79916111ee7",
   ".gitignore": "8a47e7ee1663e60e03322e66734d75c6e8760ce72478843bb5632f71a611ae2a",
-  "App/Assets/BRANDING.md": "efac739d3bc94f7ad5f1ba22443c25f2467722bb30e4a2ed0e3b15496f52d603",
+  "App/Assets/BRANDING.md": "b830cecf1c6c849c75016a0781a5e81243b97fcc6f7091b8e1d54843386de199",
   "App/Assets/Nivox-original.png": "c493e3898244e0b27fe0e5ce4d4215c1908fc83421314c892cdd3ed8b8955a2e",
   "App/Assets/Nivox.icns": "9511557b16733f118e58aee0c6a6f4c4796de26549a57a08c5ac70be2881c2c5",
   "App/Assets/icon-manifest.json": "234d94e23d133edfebb2a124e9a2e34d8c4e1d47b0cd3e27179d610a894d35b9",
@@ -13,7 +13,7 @@
   "CNoise/include/module.modulemap": "74c01cfd04d0ea167a030e8061b8feee3cc46fe40f124ff1da43cc831dd1f5fd",
   "LICENSE": "5198ce56d4dbe2f58df5ac0bd2810ecef700c92cc4a5fc30a09001638ea7209b",
   "LICENSES.md": "472c0bf99905244f509358d52b4462d25ad4b413b98eba7acc74863b6a4ed715",
-  "README.md": "c7f9eab8bba15c4a78c6c4c26fd8b04f72b97b9092a35ea12c1e6ae64943be37",
+  "README.md": "020793963ccab76fd34517fc4fef190d57140513b820ed846bbc911a8b8f9a78",
   "build.py": "40836f0bf236fe3566cde0370eb00a6092b240ccd415da9d61763916daf653fb",
   "ci/FrameworkSmoke.swift": "07c5c75f3eff02e89063d648771e7eb1d5ca0fb48d09b96c65b46db910a671bd",
   "ci/export_sources.py": "2d9374d01ff98b9d593c5390299edc0875e4c9101e1e0a9b67bed82f9f70069f",

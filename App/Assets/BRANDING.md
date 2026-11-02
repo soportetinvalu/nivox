@@ -6,7 +6,7 @@ Nombre solicitado por Christian: **Nivox**. Icono aportado por el usuario; no se
 - `Nivox.icns`: once representaciones PNG, entre 16 y 1024 píxeles, incluidas variantes Retina. Reducción proporcional RGBA mediante LANCZOS; conserva todo el diseño original. Manifest de tamaños y SHA-256 en `icon-manifest.json`.
 - Conversión histórica: reducción proporcional RGBA mediante Pillow/LANCZOS; esta entrega conserva los bytes ya validados, sin regenerarlos. `python3 ci/icon_assets.py` valida original, ICNS y manifiesto mediante biblioteca estándar; el workflow no necesita Pillow.
 - Tipografía: estilos de sistema SwiftUI (`largeTitle`, `footnote`, `monospacedDigit`); no se incluyen ni descargan fuentes tipográficas.
-- La imagen fue proporcionada para esta identidad. No se han verificado de manera independiente autoría, marca o derechos de redistribución del arte. La licencia MIT del código no se extiende a esta imagen. Confirmar titularidad antes de publicar.
+- Christian confirmó el derecho a usar y compartir la imagen como parte de Nivox. No se ha verificado independientemente su autoría ni la marca; la licencia MIT del código no se extiende a esta imagen.
 
 `CFBundleIconFile=Nivox.icns`; la receta integrada exige el recurso, lo valida y lo copia antes de firmar. Esta preparación Linux no acredita renderizado de Finder/Dock ni aceptación por macOS.
 
