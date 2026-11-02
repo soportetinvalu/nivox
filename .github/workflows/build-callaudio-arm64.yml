@@ -40,8 +40,9 @@ jobs:
   mac-arm64:
     needs: linux-core
     if: github.event_name == 'workflow_dispatch'
-    # Stable Apple Silicon pool; avoids the macos-26 capacity queue.
-    runs-on: macos-15
+    # Standard, free for this public repo; macos-15 failed runner acquisition.
+    # macos-26 previously ran here; use one bounded alternative, not a retry matrix.
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
