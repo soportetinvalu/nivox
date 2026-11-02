@@ -3,6 +3,7 @@
 #define NV_CALL_H
 #include <stddef.h>
 #include <stdint.h>
+#include "nv_call_ui.h"
 
 /* Control-plane only: serialize ALL calls on one non-RT queue. No auto-start,
  * default-device changes, recording, or silent substitution of physical UIDs. */

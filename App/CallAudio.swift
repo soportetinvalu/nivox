@@ -71,20 +71,39 @@ private final class CallEngine: @unchecked Sendable {
     private var requestingPermission = false
     private var timer: Timer?
     private var sleepObserver: NSObjectProtocol?
+    private var activity: NSObjectProtocol?
+    private var terminating = false
+    static let routingWarning = "Nivox no ofrece bypass al detenerse. Si tu llamada sigue usando Nivox Microphone o Nivox Speaker, perderá el audio de esas rutas. Selecciona el micrófono y los auriculares físicos en la app de llamadas para continuar sin Nivox. No cambiamos dispositivos por ti."
     var inputs: [CallDevice] { devices.filter(\.input) }
     var outputs: [CallDevice] { devices.filter(\.output) }
+    var canStart: Bool { !enabled && !busy && !terminating && driver && !microphone.isEmpty && !output.isEmpty }
+    var menuTitle: String { busy ? "Nivox · trabajando…" : (enabled ? "Nivox · procesando" : "Nivox · sin reenvío") }
+    var menuSymbol: String { enabled ? "waveform.circle.fill" : "mic.slash.circle" }
+
+    private func updateActivity() {
+        if enabled && activity == nil {
+            // Avoid App Nap while hidden, but never prevent system sleep.
+            activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                             reason: "Audio de llamada solicitado por el usuario")
+        } else if !enabled, let token = activity {
+            ProcessInfo.processInfo.endActivity(token); activity = nil
+        }
+    }
 
     init() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.stop(reason: "Suspensión: procesamiento detenido. Vuelve a encenderlo al regresar.") } }
+        ) { [weak self] _ in Task { @MainActor in self?.handleLifecycle(NV_CALL_UI_SLEEP) } }
     }
     deinit {
         timer?.invalidate()
+        if let token = activity { ProcessInfo.processInfo.endActivity(token) }
         if let o = sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
     }
     private func submit(_ op: CallEngine.Operation, token: UInt64, finished: (@MainActor () -> Void)? = nil) {
@@ -96,6 +115,7 @@ private final class CallEngine: @unchecked Sendable {
         }
     }
     private func apply(_ snapshot: CallSnapshot) {
+        defer { updateActivity() }
         devices = snapshot.devices; driver = snapshot.driver; detail = snapshot.detail; gaps = snapshot.gaps
         switch snapshot.state {
         case Int(NV_CALL_RUNNING):
@@ -105,21 +125,22 @@ private final class CallEngine: @unchecked Sendable {
             enabled = true; busy = true
             status = "Iniciando: esperando actividad de captura y reproducción…"
         case Int(NV_CALL_ERROR):
-            enabled = false; busy = false; status = "Audio detenido por un error."
+            enabled = false; busy = false; status = "Reenvío detenido por un error. Las llamadas que usen Nivox pueden quedarse sin audio."
         default:
-            enabled = false; busy = false; status = "Procesamiento apagado. Las rutas virtuales no transmiten audio."
+            enabled = false; busy = false; status = "Reenvío apagado. Para seguir una llamada, selecciona dispositivos físicos en esa app."
         }
     }
     func refresh() {
-        guard !enabled, !busy else { return }
+        guard !enabled, !busy, !terminating else { return }
         busy = true
         submit(.refresh, token: generation)
     }
     func start() {
-        guard !enabled, !busy else { return }
+        guard canStart else { return }
         generation &+= 1
         let token = generation
         busy = true; enabled = true; detail = ""; gaps = 0
+        updateActivity()
         status = "Comprobando permiso de micrófono…"
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: begin(token: token)
@@ -142,14 +163,35 @@ private final class CallEngine: @unchecked Sendable {
     private func permissionDenied() {
         stop(reason: "Micrófono denegado o restringido. Abre Ajustes del Sistema › Privacidad y seguridad › Micrófono, permite Nivox y vuelve a encender. No se elude TCC.")
     }
-    func stop(reason: String? = nil) {
+    func stop(reason: String? = nil, finished: (@MainActor () -> Void)? = nil) {
         generation &+= 1 // invalidate outstanding permission and worker replies
         requestingPermission = false
         enabled = false; busy = true
         status = "Deteniendo captura y reproducción…"
         submit(.stop, token: generation) { [weak self] in
             if let reason { self?.status = reason }
+            finished?()
         }
+    }
+    func handleLifecycle(_ event: Int32) {
+        guard !terminating else { return }
+        if nv_call_ui_should_stop(event, requestingPermission ? 1 : 0) != 0 {
+            let reason = event == NV_CALL_UI_SLEEP
+                ? "Suspensión: reenvío detenido. No se reanuda solo. Revisa los dispositivos y vuelve a iniciar; si tu llamada usa Nivox, no recibirá audio de estas rutas."
+                : "Solicitud de micrófono cancelada al ocultar la ventana. No se iniciará audio al responder al permiso; vuelve a iniciar explícitamente."
+            stop(reason: reason)
+        }
+    }
+    func requestStop() {
+        guard !terminating else { return }
+        guard confirmRoutingLoss(title: "¿Detener el audio de llamadas?", action: "Detener audio") else { return }
+        stop()
+    }
+    func prepareToQuit(finished: @escaping @MainActor () -> Void) {
+        terminating = true
+        timer?.invalidate(); timer = nil
+        // Reply to AppKit only after the serialized HAL close has completed.
+        stop(finished: finished)
     }
     private func poll() {
         guard enabled, !polling, !requestingPermission else { return }
@@ -168,6 +210,59 @@ private final class CallEngine: @unchecked Sendable {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
             NSWorkspace.shared.open(url)
         }
+    }
+}
+
+@MainActor func confirmRoutingLoss(title: String, action: String) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = title
+    alert.informativeText = CallAudioModel.routingWarning
+    alert.addButton(withTitle: "Cancelar y seguir")
+    alert.addButton(withTitle: action)
+    // Return/escape must not accidentally silence a call.
+    alert.buttons[0].keyEquivalent = "\r"
+    alert.buttons[1].keyEquivalent = ""
+    return alert.runModal() == .alertSecondButtonReturn
+}
+
+struct CallMenuLabel: View {
+    @ObservedObject var audio: CallAudioModel
+    var body: some View {
+        Label(audio.menuTitle, systemImage: audio.menuSymbol)
+            .accessibilityLabel(audio.menuTitle)
+    }
+}
+
+struct CallMenuView: View {
+    @ObservedObject var audio: CallAudioModel
+    @ObservedObject var probe: AudioProbe
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Text(audio.menuTitle)
+        Text(audio.status)
+        if !audio.detail.isEmpty { Text(audio.detail) }
+        if audio.gaps > 0 { Text("Cortes/desbordamientos: \(audio.gaps)") }
+        Divider()
+        Button("Abrir Nivox / dispositivos…") {
+            if let window = NSApp.windows.first(where: { $0.isVisible && $0.title == ProbeBuild.windowTitle }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "nivox-main")
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("Iniciar audio de llamadas") {
+            // A menu start can happen while A/B is visible: cancel its TCC token
+            // and fully stop capture/playback before opening the call routes.
+            probe.stop(discard: true, reason: "Inicio de llamada: prueba descartada.")
+            probe.stopPlayback()
+            audio.start()
+        }.disabled(!audio.canStart)
+        Button("Detener audio…") { audio.requestStop() }.disabled(!audio.enabled && !audio.busy)
+        Divider()
+        Text(CallAudioModel.routingWarning)
+        Button("Salir de Nivox…") { NSApp.terminate(nil) }
     }
 }
 
@@ -199,10 +294,10 @@ struct CallAudioView: View {
             }
             Text(audio.driver ? "Driver Nivox detectado" : "Driver Nivox no disponible: instala NivoxAudio.driver con el instalador y actualiza. Requiere administrador; esta app no instala nada.")
                 .foregroundColor(audio.driver ? .secondary : .orange)
-            Toggle("Procesar micrófono y salida de llamadas", isOn: Binding(
-                get: { audio.enabled }, set: { if $0 { audio.start() } else { audio.stop() } }
-            ))
-            .disabled(!audio.enabled && (audio.busy || !audio.driver || audio.microphone.isEmpty || audio.output.isEmpty))
+            HStack {
+                Button("Iniciar audio de llamadas") { audio.start() }.disabled(!audio.canStart)
+                Button("Detener audio…") { audio.requestStop() }.disabled(!audio.enabled && !audio.busy)
+            }
             Text(audio.status).font(.headline).accessibilityIdentifier("call-audio-status")
             if !audio.detail.isEmpty { Text(audio.detail).foregroundColor(.orange).textSelection(.enabled) }
             if audio.gaps > 0 {
@@ -212,7 +307,8 @@ struct CallAudioView: View {
             Button("Abrir permiso de Micrófono…") { audio.openPrivacy() }
             Divider()
             Text("En Zoom, Meet o Teams selecciona «Nivox Microphone» como entrada y «Nivox Speaker» como salida. Nivox no cambia los dispositivos predeterminados del sistema ni la configuración de esas apps.")
-            Text("Al apagar, cerrar la ventana o suspender la Mac, ambas rutas se detienen. Las apps que sigan usando los dispositivos virtuales quedarán sin audio: selecciona tus dispositivos físicos para continuar sin Nivox.")
+            Text("Cerrar la ventana o cambiar de pestaña no interrumpe una llamada activa. Nivox sigue en la barra de menús: puedes reabrir esta ventana o detener el audio explícitamente. Una solicitud de permiso pendiente se cancela al cerrar la ventana.")
+            Text(CallAudioModel.routingWarning).foregroundColor(.orange)
             Text("Usa auriculares y baja el volumen antes de activar. Sin cancelación de eco (AEC). La salida se mezcla a mono antes de duplicarse en estéreo. Actividad del motor no confirma que tu app de llamadas esté usando Nivox. Pendiente de validación en una Mac real.")
                 .font(.footnote).foregroundColor(.secondary)
         }.padding(24).frame(minWidth: 780, minHeight: 560)

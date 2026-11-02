@@ -136,6 +136,44 @@ static void test_rejected_samples_and_gaps(void) {
     f.stats[1].rejected = 1; nv_call_poll(c, 1); error(c, &f, "rechazó"); destroy(c, &f);
 }
 static void test_destroy_active(void) { fixture f; nv_call *c = create(&f); start(c); destroy(c, &f); assert(f.closes == 2); }
+static void ui_event(nv_call *c, int event, int permission_pending) {
+    if (nv_call_ui_should_stop(event, permission_pending)) nv_call_stop(c);
+}
+static void test_ui_hide_keeps_call(void) {
+    for (int running = 0; running < 2; running++) {
+        fixture f; nv_call *c = create(&f); start(c);
+        if (running) { progress(&f); nv_call_poll(c, 0.5); }
+        int state = nv_call_state(c);
+        for (int i = 0; i < 100; i++) {
+            ui_event(c, NV_CALL_UI_TAB_CHANGED, 0);
+            ui_event(c, NV_CALL_UI_WINDOW_CLOSED, 0);
+            assert(nv_call_state(c) == state); assert(f.live == 2); assert(f.closes == 0);
+        }
+        nv_call_stop(c); assert(f.closes == 2); destroy(c, &f);
+    }
+}
+static void test_ui_pending_permission_is_cancelled(void) {
+    assert(nv_call_ui_should_stop(NV_CALL_UI_TAB_CHANGED, 1));
+    assert(nv_call_ui_should_stop(NV_CALL_UI_WINDOW_CLOSED, 1));
+    fixture f; nv_call *c = create(&f);
+    ui_event(c, NV_CALL_UI_WINDOW_CLOSED, 1);
+    nv_call_poll(c, 100); assert(f.opens == 0); destroy(c, &f);
+    /* Swift's generation token is a separate source-contract check, not TCC IO. */
+}
+static void test_ui_sleep_stops_without_restart(void) {
+    for (int pending = 0; pending < 2; pending++) {
+        fixture f; nv_call *c = create(&f); start(c);
+        ui_event(c, NV_CALL_UI_SLEEP, pending);
+        assert(nv_call_state(c) == NV_CALL_STOPPED); assert(f.live == 0); assert(f.closes == 2);
+        ui_event(c, NV_CALL_UI_TAB_CHANGED, 0); /* reopening isn't a start */
+        nv_call_poll(c, 100); assert(f.opens == 2); destroy(c, &f);
+    }
+}
+static void test_ui_hidden_health_checks(void) {
+    fixture f; nv_call *c = create(&f); start(c); progress(&f); nv_call_poll(c, 0.5);
+    ui_event(c, NV_CALL_UI_WINDOW_CLOSED, 0);
+    nv_call_poll(c, 6); error(c, &f, "5 s"); assert(f.closes == 2); destroy(c, &f);
+}
 int main(void) {
     unsigned tests = 0;
 #define TEST(name) do { name(); tests++; } while (0)
@@ -143,6 +181,8 @@ int main(void) {
     TEST(test_open_rollback); TEST(test_activity_required_on_both_paths);
     TEST(test_stall_startup_and_running); TEST(test_route_changes); TEST(test_catalog_failure);
     TEST(test_rejected_samples_and_gaps); TEST(test_destroy_active);
+    TEST(test_ui_hide_keeps_call); TEST(test_ui_pending_permission_is_cancelled);
+    TEST(test_ui_sleep_stops_without_restart); TEST(test_ui_hidden_health_checks);
     printf("{\"ok\":true,\"tests\":%u,\"backend\":\"injected; not CoreAudio\"}\n", tests);
     return 0;
 }

@@ -1,0 +1,130 @@
+{
+  "base_commit": "b6a1358208c4ba843cfefe26ee7a64c99cb4ba8c",
+  "platform": "Linux",
+  "mac_compiled": false,
+  "physical_audio_tested": false,
+  "swiftui_executed": false,
+  "pushed": false,
+  "limits": "Controlador C y política de ciclo de vida reales con backend inyectado; guardas Swift de fuente, no compilación ni TCC. No se ejecutó HAL, barra de menús ni llamada física.",
+  "control": {
+    "command": "python3 tests/test_call_audio.py --out build/call-ui-lifecycle-control-final",
+    "report": "build/call-ui-lifecycle-control-final/report.json",
+    "report_sha256": "84e2428846b69c3ee7cc0355381ddd81c84bec2bcdb93f1a56c205203cf14b7e",
+    "release": {
+      "ok": true,
+      "tests": 14,
+      "backend": "injected; not CoreAudio"
+    },
+    "asan_ubsan": {
+      "ok": true,
+      "tests": 14,
+      "backend": "injected; not CoreAudio"
+    },
+    "readiness_mutation_rejected": true,
+    "readiness_mutation_returncode": -6,
+    "ui_mutations": [
+      {
+        "name": "hide_stops_call",
+        "rejected": true,
+        "returncode": -6
+      },
+      {
+        "name": "late_permission",
+        "rejected": true,
+        "returncode": -6
+      },
+      {
+        "name": "sleep_keeps_call",
+        "rejected": true,
+        "returncode": -6
+      }
+    ],
+    "swift_contract_mutation_rejected": true,
+    "mutation_count": 5
+  },
+  "linux_regression": {
+    "command": "python3 build.py --target linux --out build/call-ui-lifecycle-linux-final",
+    "report": "build/call-ui-lifecycle-linux-final/report.json",
+    "report_sha256": "808d6c8fc9b148f9726eb3e5591802021f62ff241c187f2d730465f84043f20f",
+    "ok": true,
+    "native_test": {
+      "native_assertions": "passed",
+      "concurrent_frames": 240000,
+      "allocation_wrapping": true,
+      "callback_worker_allocations": 0
+    },
+    "unit_tests": {
+      "ok": true,
+      "count": 21
+    },
+    "integration_ok": true,
+    "integration_cases": 14,
+    "call_control_tests": {
+      "ok": true,
+      "tests": 14,
+      "backend": "injected; not CoreAudio"
+    }
+  },
+  "delivery": {
+    "command": "python3 tests/test_delivery.py --out build/call-ui-lifecycle-delivery-final",
+    "report": "build/call-ui-lifecycle-delivery-final/report.json",
+    "report_sha256": "fd84bb9aac79d38ff8a09052a766c8ada5693944bdf4bf4e2f0236c1e7a98529",
+    "ok": true,
+    "tests_run": 21,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "mac_compiled": false,
+    "parser_uses_synthetic_fixtures": true
+  },
+  "mac_guard": {
+    "command": [
+      "python3",
+      "build.py",
+      "--target",
+      "macapp",
+      "--out",
+      "build/call-ui-lifecycle-mac-blocked"
+    ],
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "BLOQUEADO: actual Darwin arm64 + Apple SDK required; Mac compilation NOT tested on Linux\n",
+    "output_created": false
+  },
+  "input_hashes": {
+    "build.py": "3ee59df14b47192c45ea6c3bcb9ab4698f7b2be08b0f0fe843d55be64adf6ce6",
+    "src/speex_noise.c": "83fa96cc1c64a0841553fc0491bd591f0c9887a90c7b76107282d50f52153b8c",
+    "CNoise/NoiseProbe.c": "4d45834ba9b43e5db9fb1298be76361e84980343020d82579fb8df6cd3c20fd7",
+    "CNoise/include/NoiseProbe.h": "c317dd4007dc9efd9a68763462ce4da2a2255cb32f3413020a2fdb88402d5f8b",
+    "include/christian_noise.h": "da67c20b313387b7a6248a215e27cdc6b0bfb1d5c2ab9f29c8e9fc671901348e",
+    "tests/stream_test.c": "9955096ec27561c087c0a1641df7ab0e41a92e26c58de99addc0dde0e0d161d9",
+    "tests/test_engine.py": "f03eb57539aa7be53054ea8d7ee87ee5f4f32112a018c2f8f8fc8d71b8a6bd8a",
+    "tests/test_integration.py": "1b78c70d8a5b5ee4782687b79c7bcd35b04850d4a9fe33e33d12c6e003ca6e45",
+    "python/christian_noise.py": "4cd83ee121340d7a4321a3655741e56fb23cc96675c7c4c9025ac3ee5fb3571d",
+    "ci/FrameworkSmoke.swift": "07c5c75f3eff02e89063d648771e7eb1d5ca0fb48d09b96c65b46db910a671bd",
+    "App/NoiseProbeApp.swift": "6fcd020a514daa0784e20f79755a575718cc8c7fd96509c43f081ac04da4dbb9",
+    "App/Info.plist": "3aa6565cbded59236923814fed602872e2e5a91b5dc70b759d3f6f82ce906c3e",
+    "App/Entitlements.plist": "71042aac63541bb0e540b3748133c3f0eae471e999dcbde4b73ff9337d3b97ee",
+    "App/Assets/Nivox.icns": "9511557b16733f118e58aee0c6a6f4c4796de26549a57a08c5ac70be2881c2c5",
+    "App/Assets/Nivox-original.png": "c493e3898244e0b27fe0e5ce4d4215c1908fc83421314c892cdd3ed8b8955a2e",
+    "App/Assets/icon-manifest.json": "234d94e23d133edfebb2a124e9a2e34d8c4e1d47b0cd3e27179d610a894d35b9",
+    "ci/icon_assets.py": "4af39cf7fa9c82f2d758c73d5b60fa092786c6dcaab6a27a5edc7e81687c307e",
+    "ci/call_audio_build.py": "d96a05bc05c3099056f2e67dce4a88e5450743420070e09d6bd77a40fa8a958c",
+    "App/CallAudio.swift": "a16af2258d2b110de4716862ad79c3545afefc254b4a2d765a0ac5c5a99f5843",
+    "callaudio/control/nv_call.h": "dfa5a9a6725ed6ac7f6574457c0406439290401706c093d5f9abd4df3526011d",
+    "callaudio/control/nv_call_ui.h": "687e29b95496be8b36ac0691b952269279b752e631f9752fc82959051cb82a2c",
+    "callaudio/control/module.modulemap": "9c970c17a0183ae3aa51d5068eb1310b4f5db972ffa8fc1d2387b6997d75eca2",
+    "callaudio/tests/test_call_control.c": "198ba6abbf2fbd9a01a898a8352225826f8470e26e8fd423ad9c504ace6c43aa",
+    "callaudio/control/nv_call.c": "8a04514712d79b7e65125ec511a5230474005918c006d66f45120e96c6b16f18",
+    "callaudio/mac/nv_call_mac.c": "f0b75e39c63613213179d6af67147b0932bfabb934fa32db919eb837301543eb",
+    "callaudio/mac/nv_hal.c": "a8ed3d19965fa57b9937ffc707fac47d3b2ee77fc783c65417622b703908b169",
+    "callaudio/mac/nv_path.c": "5895447f707323de12f645ddc6e42adbdea38ba9ecf7a06466d80331abddf070",
+    "callaudio/core/nv_bridge.c": "65476ebee43d9ec0f1fe948ff498ef2938b5cd3486702c2a769e70a3b40f3393",
+    "callaudio/core/nv_driver_core.c": "3dc8531015f391649f802dd8bdd8421a860f1f1ca52357748b987566c23cd512",
+    "tests/test_call_audio.py": "3003acc180667b53da5fc1637d5bc8c4e2e2258bb23dc90fc1109a8bc46cb591"
+  },
+  "log_sha256": {
+    "build/call-ui-lifecycle-control-final/commands.log": "072250f967c848da2ca9713ef3ad9f532de2fa2cf98ebb9886a0afcf95c564c7",
+    "build/call-ui-lifecycle-linux-final/commands.log": "e0ada9552410ce88c951cb15cdf66bb1d563c8f5a639eab3e38b983c102276b4"
+  }
+}

@@ -2,7 +2,11 @@
 
 **Integración de llamadas nueva, aún sin validación Mac:** la pestaña Llamadas conecta
 el motor CoreAudio/SpeexDSP dentro de Nivox.app, con encendido/apagado, selección
-de hardware, estado basado en callbacks y errores. Requiere instalar el driver
+de hardware, estado basado en callbacks y errores. Continúa al cerrar la ventana
+o cambiar de pestaña; la barra de menús permite reabrir, iniciar y detener.
+Detener/salir pide confirmación: **sin bypass**, las llamadas que sigan usando
+Nivox pierden esas rutas hasta seleccionar dispositivos físicos. Suspender
+detiene el motor sin reanudación automática. Requiere instalar el driver
 Nivox por separado. Véase [integración y aceptación](docs/CALL_AUDIO_UI.md) y
 [arquitectura de llamadas](callaudio/README.md). La compilación Mac citada abajo
 corresponde únicamente al prototipo anterior, no verifica estos cambios.

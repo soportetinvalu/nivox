@@ -119,6 +119,7 @@ def main():
                                          HERE / 'App/Assets/Nivox-original.png', HERE / 'App/Assets/icon-manifest.json',
                                          HERE / 'ci/icon_assets.py', HERE / 'ci/call_audio_build.py',
                                          HERE / 'App/CallAudio.swift', HERE / 'callaudio/control/nv_call.h',
+                                         HERE / 'callaudio/control/nv_call_ui.h',
                                          HERE / 'callaudio/control/module.modulemap',
                                          HERE / 'callaudio/tests/test_call_control.c',
                                          *CONTROL_SOURCES]}}

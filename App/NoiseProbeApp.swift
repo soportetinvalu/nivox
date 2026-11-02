@@ -3,8 +3,9 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import NoiseProbe
+import NivoxCallAudio
 
-private enum ProbeBuild {
+enum ProbeBuild {
     static let canCapture = true
     static let subtitle = "SpeexDSP 1.2.1 · supresión −15 dB · sin pesos · experimental"
     static let windowTitle = "Nivox · audio local"
@@ -46,6 +47,7 @@ enum ProbeError: LocalizedError {
     private var playback: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var playbackObserver: NSObjectProtocol?
+    private var permissionGeneration: UInt64 = 0
 
     init() {
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -59,6 +61,8 @@ enum ProbeError: LocalizedError {
     }
     func start() {
         guard !recording && !requesting else { return }
+        permissionGeneration &+= 1
+        let token = permissionGeneration
         stopPlayback()
         requesting = true
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -67,7 +71,7 @@ enum ProbeError: LocalizedError {
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
                 Task { @MainActor in
-                    guard let self = self, self.requesting else { return }
+                    guard let self = self, self.requesting, self.permissionGeneration == token else { return }
                     self.requesting = false
                     if allowed { self.beginCapture() }
                     else { self.status = "Permiso de micrófono denegado. No hay captura." }
@@ -134,6 +138,7 @@ enum ProbeError: LocalizedError {
         }
     }
     func stop(discard: Bool = false, reason: String? = nil) {
+        permissionGeneration &+= 1
         requesting = false // an outstanding TCC reply must not restart after window close/sleep
         ticker?.invalidate(); ticker = nil
         if let observer = routeObserver { NotificationCenter.default.removeObserver(observer) }
@@ -224,28 +229,71 @@ enum ProbeError: LocalizedError {
     }
 }
 
+@MainActor final class NivoxAppDelegate: NSObject, NSApplicationDelegate {
+    // App-owned, not window-owned: closing/recreating a view cannot destroy HAL.
+    let probe = AudioProbe()
+    let calls = CallAudioModel()
+    private var quitting = false
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if quitting { return .terminateLater }
+        guard confirmRoutingLoss(title: "¿Salir de Nivox?", action: "Detener audio y salir") else { return .terminateCancel }
+        quitting = true
+        probe.stop(discard: true, reason: "Saliendo: prueba descartada.")
+        probe.stopPlayback()
+        calls.prepareToQuit { sender.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
+    }
+}
+
 @main @MainActor struct NivoxApp: App {
-    @StateObject private var probe = AudioProbe()
-    @StateObject private var calls = CallAudioModel()
-    @State private var tab = 0
+    @NSApplicationDelegateAdaptor(NivoxAppDelegate.self) private var delegate
     var body: some Scene {
-        WindowGroup(ProbeBuild.windowTitle) {
-            TabView(selection: $tab) {
-                CallAudioView(audio: calls).tabItem { Text("Llamadas") }.tag(0)
-                probeView.disabled(calls.busy || calls.enabled).tabItem { Text("Prueba A/B") }.tag(1)
-            }
-            .onChange(of: tab) { _ in
-                // Tests and continuous call routing must never capture/play together.
-                calls.stop()
-                probe.stop(discard: true, reason: "Cambio de pestaña: prueba detenida.")
-                probe.stopPlayback()
-            }
-            .onDisappear {
-                calls.stop(reason: "Ventana cerrada: procesamiento detenido.")
-                probe.stop(discard: true, reason: "Ventana cerrada: captura detenida.")
-                probe.stopPlayback()
+        // Window (singular) can quit on close. WindowGroup + the delegate's
+        // explicit last-window policy keep this app alive for ongoing calls.
+        WindowGroup(ProbeBuild.windowTitle, id: "nivox-main") {
+            NivoxContent(probe: delegate.probe, calls: delegate.calls)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .appTermination) {
+                Button("Salir de Nivox…") { NSApp.terminate(nil) }.keyboardShortcut("q")
             }
         }
+        MenuBarExtra {
+            CallMenuView(audio: delegate.calls, probe: delegate.probe)
+        } label: {
+            CallMenuLabel(audio: delegate.calls)
+        }
+    }
+}
+
+private struct NivoxContent: View {
+    @ObservedObject var probe: AudioProbe
+    @ObservedObject var calls: CallAudioModel
+    @State private var tab = 0
+    var body: some View {
+        TabView(selection: $tab) {
+            CallAudioView(audio: calls).tabItem { Text("Llamadas") }.tag(0)
+            probeView.disabled(calls.busy || calls.enabled).tabItem { Text("Prueba A/B") }.tag(1)
+        }
+        .onChange(of: tab) { _ in
+            calls.handleLifecycle(NV_CALL_UI_TAB_CHANGED)
+            probe.stop(discard: true, reason: "Cambio de pestaña: prueba detenida.")
+            probe.stopPlayback()
+        }
+        .onDisappear { closeSurface() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+            // Do not rely only on SwiftUI disappearance to invalidate a TCC reply.
+            guard let window = notification.object as? NSWindow,
+                  window.title == ProbeBuild.windowTitle else { return }
+            closeSurface()
+        }
+    }
+    private func closeSurface() {
+        calls.handleLifecycle(NV_CALL_UI_WINDOW_CLOSED)
+        probe.stop(discard: true, reason: "Ventana cerrada: captura detenida.")
+        probe.stopPlayback()
     }
     private var probeView: some View {
             VStack(alignment: .leading, spacing: 16) {
