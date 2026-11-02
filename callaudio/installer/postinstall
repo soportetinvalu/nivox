@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# pkg postinstall: coreaudiod only scans /Library/Audio/Plug-Ins/HAL at start.
+# Restarting it interrupts audio on this Mac for ~1-2 s (launchd relaunches it).
+/usr/bin/killall coreaudiod 2>/dev/null || true
+exit 0

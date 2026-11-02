@@ -1,0 +1,91 @@
+name: Nivox call audio arm64 (manual, no release)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nivox-callaudio-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)
+        run: python3 callaudio/tools/build_callaudio.py --target linux --out build/callaudio-linux
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nivox-callaudio-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/callaudio-linux/report.json
+            build/callaudio-linux/commands.log
+            build/callaudio-linux/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+  mac-arm64:
+    needs: linux-core
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Require Apple Silicon, build driver + engine, sign ad hoc, package
+        shell: bash
+        run: |
+          [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || { echo 'BLOQUEADO: Darwin arm64 required'; exit 1; }
+          python3 callaudio/tools/build_callaudio.py --target mac --out build/callaudio-mac
+      - name: E2E on the ephemeral runner (installs the plug-in on the CI VM only)
+        shell: bash
+        run: |
+          [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
+          out=build/callaudio-mac
+          sudo ditto "$out/NivoxAudio.driver" /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver
+          sudo chown -R root:wheel /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver
+          sudo killall coreaudiod || true
+          found=0
+          for i in $(seq 1 40); do
+            if "$out/nivox-callaudio" --list > "$out/devices.json" 2>/dev/null && grep -q 'nivox.microphone.v1' "$out/devices.json"; then found=1; break; fi
+            sleep 1
+          done
+          [[ "$found" == "1" ]] || { echo 'driver not loaded by coreaudiod'; cat "$out/devices.json" || true; exit 1; }
+          rc=0; "$out/nv-e2e" > "$out/e2e.json" || rc=$?
+          cat "$out/e2e.json"
+          [[ "$rc" == "0" ]] || { echo "nv-e2e failed ($rc)"; exit 1; }
+          rc=0; "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 4 2> "$out/cli-smoke.jsonl" || rc=$?
+          cat "$out/cli-smoke.jsonl"
+          [[ "$rc" == "0" ]] && grep -q '"event":"started"' "$out/cli-smoke.jsonl" || { echo 'CLI smoke failed'; exit 1; }
+      - name: CoreAudio logs for diagnosis
+        if: always()
+        shell: bash
+        run: |
+          log show --last 5m --style compact --predicate 'process == "coreaudiod" OR process CONTAINS "Core-Audio-Driver-Service"' > build/callaudio-mac/coreaudio.log 2>&1 || true
+          tail -n 80 build/callaudio-mac/coreaudio.log || true
+      - name: Retain ad hoc build and evidence (not a Release)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nivox-callaudio-arm64-adhoc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/callaudio-mac/Nivox-CallAudio-arm64-adhoc.zip
+            build/callaudio-mac/NivoxAudio-driver-unsigned.pkg
+            build/callaudio-mac/report.json
+            build/callaudio-mac/commands.log
+            build/callaudio-mac/SHA256SUMS
+            build/callaudio-mac/devices.json
+            build/callaudio-mac/e2e.json
+            build/callaudio-mac/cli-smoke.jsonl
+            build/callaudio-mac/coreaudio.log
+          if-no-files-found: warn
+          retention-days: 7
