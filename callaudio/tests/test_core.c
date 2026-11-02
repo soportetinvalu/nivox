@@ -6,6 +6,8 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "nv_core.h"
+#include "nv_signal.h"
+#include "nv_watch.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -13,6 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+#endif
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -288,6 +293,48 @@ static int run_sim(const sim_case *k, sim_result *res) {
     return 0;
 }
 
+/* Nonstationary signal with denoise fully active; muting must fail this test. */
+static void test_denoise_signal(int mute_output) {
+    nv_bridge_config cfg = {48000, 1, 48000, 1, 480, 1440, 1.f, 2000};
+    nv_bridge *b = nv_bridge_create(&cfg);
+    const size_t cap = 48000 * 4;
+    float *recording = calloc(cap, sizeof *recording);
+    float in[480], out[480]; unsigned seed = 19; size_t recorded = 0;
+    CHECK(b && recording, "denoise signal allocation");
+    if (!b || !recording) { nv_bridge_destroy(b); free(recording); return; }
+    for (unsigned block = 0; block < 1000; block++) {
+        for (unsigned i = 0; i < 480; i++) {
+            double t = (block * 480.0 + i) / 48000;
+            double signal = block < 200 ? 0 : 0.25 * (0.6 + 0.4 * sin(2 * M_PI * 1.3 * t)) * sin(2 * M_PI * 1000 * t);
+            in[i] = (float)(signal + (block < 200 ? 0.05 : 0.001) * lcg_noise(&seed));
+        }
+        TRACK(1);
+        nv_bridge_push(b, in, 480, (uint64_t)block * 10000000 + 1);
+        nv_bridge_pull(b, out, 480, (uint64_t)block * 10000000 + 5000001);
+        TRACK(0);
+        if (mute_output) memset(out, 0, sizeof out); /* explicit test mutation */
+        if (block >= 600) { memcpy(recording + recorded, out, sizeof out); recorded += 480; }
+    }
+    double gain = 0, coherence = 0, reference = 0.25 * sqrt((0.6 * 0.6 + 0.4 * 0.4 / 2) / 2);
+    int preserved = nv_signal_preserved(recording, recorded, 48000, 1000, reference, &gain, &coherence);
+    CHECK(preserved, "denoise signal lost: gain %.2f dB coherence %.3f", gain, coherence);
+    fprintf(stderr, "denoise-preservation gain_db=%.2f coherence=%.3f mute_mutation=%d\n", gain, coherence, mute_output);
+    memset(recording, 0, cap * sizeof *recording);
+    CHECK(!nv_signal_preserved(recording, cap, 48000, 1000, reference, &gain, &coherence), "oracle accepted complete silence");
+    free(recording); nv_bridge_destroy(b);
+}
+
+static void test_endpoint_watch(void) {
+    nv_endpoint_state a = {42, 1, 2, 480, 48000, 123}, b = a;
+    CHECK(!nv_endpoint_changed(&a, &b), "unchanged endpoint must not restart");
+    b.id++; CHECK(nv_endpoint_changed(&a, &b), "redetect replacement virtual ID"); b = a;
+    b.rate = 44100; CHECK(nv_endpoint_changed(&a, &b), "redetect nominal rate"); b = a;
+    b.channels = 1; CHECK(nv_endpoint_changed(&a, &b), "redetect channel count"); b = a;
+    b.buffer = 512; CHECK(nv_endpoint_changed(&a, &b), "redetect buffer size"); b = a;
+    b.format_hash++; CHECK(nv_endpoint_changed(&a, &b), "redetect physical stream format"); b = a;
+    b.alive = 0; CHECK(nv_endpoint_changed(&a, &b), "redetect dead endpoint");
+}
+
 /* Impulse latency through the whole bridge (strength 0 = delayed dry). */
 static double impulse_latency_ms(uint32_t target, uint32_t block) {
     nv_bridge_config cfg = {48000, 1, 48000, 1, block, target, 0.f, 2000};
@@ -309,11 +356,13 @@ static double impulse_latency_ms(uint32_t target, uint32_t block) {
 /* Two real threads, wall-clock paced, for TSan and scheduling realism. */
 static nv_bridge *tb; static atomic_int tstop;
 static void sleep_until(double ms) {
-#ifdef __APPLE__ /* no clock_nanosleep on macOS: relative sleep is close enough here */
+#ifdef __APPLE__ /* absolute Mach wait avoids relative nanosleep coalescing */
     double d = ms - ms_now();
     if (d <= 0) return;
-    struct timespec ts; ts.tv_sec = (time_t)(d / 1e3); ts.tv_nsec = (long)(fmod(d, 1e3) * 1e6);
-    nanosleep(&ts, NULL);
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    uint64_t deadline = mach_absolute_time() + (uint64_t)(d * 1e6 * tb.denom / tb.numer);
+    mach_wait_until(deadline);
 #else
     struct timespec ts; ts.tv_sec = (time_t)(ms / 1e3); ts.tv_nsec = (long)(fmod(ms, 1e3) * 1e6);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
@@ -350,6 +399,13 @@ static void test_bridge_threads(unsigned long long *underruns, unsigned long lon
 }
 
 int main(int argc, char **argv) {
+    int denoise_only = argc > 1 && strcmp(argv[1], "--denoise-only") == 0;
+    int mute_output = argc > 2 && strcmp(argv[2], "--mute-denoise-output") == 0;
+    test_endpoint_watch(); test_denoise_signal(mute_output);
+    if (denoise_only) {
+        printf("{\"ok\":%s,\"failures\":%d,\"muted_output\":%s}\n", failures ? "false" : "true", failures, mute_output ? "true" : "false");
+        return failures ? 1 : 0;
+    }
     int quick = argc > 1 && strcmp(argv[1], "--quick") == 0; /* sanitizer builds */
     double t0 = ms_now();
     test_clock(); test_ring_basic(); test_fifo(); test_ring_threads();
@@ -383,7 +439,7 @@ int main(int argc, char **argv) {
             CHECK(r.fill_max - r.fill_min < 3.0 * k->target, "%s: fill span %.0f..%.0f", k->name, r.fill_min, r.fill_max);
             CHECK(r.fill_min > 0, "%s: fill hit zero", k->name);
         } else {
-            CHECK(r.reduction_db > 6, "%s: noise reduction only %.1f dB", k->name, r.reduction_db);
+            CHECK(r.reduction_db > 6 && r.reduction_db < 40, "%s: invalid noise reduction %.1f dB (mute is not denoising)", k->name, r.reduction_db);
         }
         pos += snprintf(json + pos, sizeof json - pos,
             "%s{\"name\":\"%s\",\"seconds\":%.0f,\"underruns_after_prime\":%llu,\"overflows\":%llu,"

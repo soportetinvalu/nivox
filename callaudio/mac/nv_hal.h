@@ -4,6 +4,7 @@
 #ifndef NV_HAL_H
 #define NV_HAL_H
 #include <CoreAudio/CoreAudio.h>
+#include "nv_watch.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -24,7 +25,10 @@ uint32_t nv_device_hidden(AudioObjectID dev);
 uint32_t nv_device_clock_domain(AudioObjectID dev);
 int nv_device_set_buffer_frames(AudioObjectID dev, uint32_t frames);
 void nv_list_devices_json(FILE *out);
-uint64_t nv_host_to_ns(uint64_t host_time);
+nv_endpoint_state nv_device_state(AudioObjectID dev, int input);
+/* Call from the control thread before starting any IO or using host time. */
+void nv_host_time_init(void);
+uint64_t nv_host_to_ns(uint64_t t);
 uint64_t nv_now_ns(void);
 
 /* RT callback: interleaved float32 at the device nominal rate. */

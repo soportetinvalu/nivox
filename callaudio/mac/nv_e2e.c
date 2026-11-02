@@ -11,6 +11,7 @@
  * means microphone (TCC) permission was denied to the calling process.
  */
 #include "nv_path.h"
+#include "nv_signal.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@ static void note(const char *fmt, const char *a, double v) {
 }
 #define EXPECT(cond, what, val) do { if (!(cond)) { failures++; note("FAIL", what, (double)(val)); } } while (0)
 
-enum { GEN_SINE, GEN_NOISE, GEN_IMPULSE };
+enum { GEN_SINE, GEN_NOISE, GEN_IMPULSE, GEN_SIGNAL };
 typedef struct {
     int mode; double rate; double phase; float amp; uint32_t seed;
     uint64_t frames, impulse_after; _Atomic uint64_t impulse_ns; int impulse_done;
@@ -40,6 +41,10 @@ static void gen_cb(void *ctx, float *d, uint32_t n, uint32_t ch, const AudioTime
     for (uint32_t i = 0; i < n; i++) {
         float x = 0;
         if (g->mode == GEN_SINE) { x = g->amp * (float)sin(g->phase); g->phase += 2 * M_PI * 1000.0 / g->rate; if (g->phase > 2 * M_PI) g->phase -= 2 * M_PI; }
+        else if (g->mode == GEN_SIGNAL) {
+            double t = (g->frames + i) / g->rate;
+            x = g->amp * (float)((0.6 + 0.4 * sin(2 * M_PI * 1.3 * t)) * sin(2 * M_PI * 1000 * t));
+        }
         else if (g->mode == GEN_NOISE) { g->seed = g->seed * 1664525u + 1013904223u; x = g->amp * (((float)(g->seed >> 8) / 8388608.f) - 1.f); }
         else if (g->mode == GEN_IMPULSE && !g->impulse_done && g->frames + i >= g->impulse_after) {
             x = g->amp; g->impulse_done = 1;
@@ -138,6 +143,7 @@ static int listed(AudioObjectID dev) {
 }
 
 int main(void) {
+    nv_host_time_init();
     AudioObjectID mic = nv_device_for_uid(NV_UID_MICROPHONE), feed = nv_device_for_uid(NV_UID_MIC_FEED);
     AudioObjectID spk = nv_device_for_uid(NV_UID_SPEAKER), ret = nv_device_for_uid(NV_UID_SPEAKER_RETURN);
     printf("{\"devices\":");
@@ -228,7 +234,17 @@ int main(void) {
         double in_rms = 0.05 / sqrt(3.0), out_rms = n ? sqrt(sq / n) : 0;
         double red = 20 * log10(in_rms / (out_rms + 1e-12));
         printf(",\"engine_denoise\":{\"input_rms\":%.4f,\"output_rms\":%.5f,\"reduction_db\":%.1f}", in_rms, out_rms, red);
-        EXPECT(n > 0 && red > 6, "denoise reduction dB", red);
+        EXPECT(n > 0 && red > 6 && red < 40, "denoise reduction dB (mute is invalid)", red);
+        rec_free(&r);
+        rec_init(&r, 6, 48000); memset(&g, 0, sizeof g); g.mode = GEN_SIGNAL; g.amp = 0.25f;
+        run(spk, 2, &g, mic, 1, &r, 5.5);
+        double gain = 0, coherence = 0, ref = 0.25 * sqrt((0.6 * 0.6 + 0.4 * 0.4 / 2) / 2);
+        size_t start = r.len > 96000 ? r.len - 96000 : 0;
+        int preserved = nv_signal_preserved(r.buf + start, r.len - start, 48000, 1000, ref, &gain, &coherence);
+        printf(",\"engine_denoise_signal\":{\"gain_db\":%.2f,\"coherence\":%.3f,\"preserved\":%s}", gain, coherence, preserved ? "true" : "false");
+        EXPECT(preserved, "denoise signal preservation gain dB", gain);
+        memset(r.buf, 0, r.cap * sizeof *r.buf);
+        EXPECT(!nv_signal_preserved(r.buf, r.cap, 48000, 1000, ref, &gain, &coherence), "silence countertest rejected", gain);
         rec_free(&r);
         nv_path_close(&p);
     }

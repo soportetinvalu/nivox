@@ -104,6 +104,9 @@ def linux(run, out, report):
     wrap = ['-DWRAP_ALLOC'] + ['-Wl,--wrap=' + f for f in ['malloc', 'calloc', 'realloc', 'free']]
     run([cc, '-O2', *WARN, *INC, *sinc, CA / 'tests/test_core.c', *CORE_C, lib, '-lm', '-pthread', *wrap, '-o', exe])
     report['release'] = last_json(run([exe]))
+    report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
+    if report['muted_denoiser_countertest'].get('ok') is not False:
+        raise RuntimeError('signal-preservation test accepted a muted denoiser')
     asan_flags = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-sanitize-recover=all']
     alib, asinc = build_speex(run, out, cc, ['-fPIC', *asan_flags], 'asan')
     aexe = out / 'test_core_asan'
@@ -131,9 +134,6 @@ def mac(run, out, report):
     lib, sinc = build_speex(run, out, cc, ['-O2', '-fPIC', *target], 'release')
     exe = out / 'test_core'
     run([cc, '-O2', *target, *WARN, *INC, *sinc, CA / 'tests/test_core.c', *CORE_C, lib, '-lm', '-o', exe])
-    report['core_tests'] = last_json(run([exe]))
-    if not report['core_tests'].get('ok'):
-        raise RuntimeError('core tests failed on macOS')
     # libASPL (MIT), compiled from the pinned release tarball
     safe_extract(ASPL, out, ASPL_SHA)
     aspl = out / 'libASPL-3.1.2'
@@ -175,11 +175,29 @@ def mac(run, out, report):
     mac_c = [CA / 'mac/nv_hal.c', CA / 'mac/nv_path.c']
     fw = ['-framework', 'CoreAudio', '-framework', 'AudioToolbox', '-framework', 'CoreFoundation']
     tools = {}
-    for name, main in [('nivox-callaudio', CA / 'mac/nivox_callaudio.c'), ('nv-e2e', CA / 'mac/nv_e2e.c')]:
+    for name, main in [('nivox-callaudio', CA / 'mac/nivox_callaudio.c'), ('nv-e2e', CA / 'mac/nv_e2e.c'),
+                       ('nv-hal-test', CA / 'tests/test_mac_clock.c')]:
         t = out / name
         run([cc, '-O2', *target, *WARN, *INC, *sinc, f'-I{CA / "mac"}', main, *mac_c, *CORE_C, lib, *fw, '-o', t])
         tools[name] = audit_macho(run, t)
-        run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', t])
+        run(['codesign', '--force', '--sign', '-', '--options', 'runtime',
+             '--entitlements', CA / 'mac/audio-input.entitlements', '--timestamp=none', t])
+        run(['codesign', '--verify', '--strict', t])
+        signed = run(['codesign', '-d', '--entitlements', ':-', t])
+        ent = plistlib.loads(signed[signed.index('<?xml'):signed.index('</plist>') + len('</plist>')].encode())
+        if ent.get('com.apple.security.device.audio-input') is not True:
+            raise RuntimeError(f'{name}: signed audio-input entitlement missing')
+        tools[name]['audio_input_entitlement'] = True
+    # Compile/audit all Apple code before executing tests, so failures retain build evidence.
+    report['core_tests'] = last_json(run([exe]))
+    report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
+    if report['muted_denoiser_countertest'].get('ok') is not False:
+        raise RuntimeError('signal-preservation test accepted a muted denoiser')
+    if not report['core_tests'].get('ok'):
+        raise RuntimeError('core tests failed on macOS')
+    report['mac_clock_stress'] = last_json(run([out / 'nv-hal-test']))
+    if not report['mac_clock_stress'].get('ok'):
+        raise RuntimeError('Mac host-time concurrent read test failed')
     report['tools'] = tools
     # ZIP (driver + tools + scripts + notices), re-verified after extraction
     stage = out / 'Nivox-CallAudio'

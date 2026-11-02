@@ -7,6 +7,7 @@
  */
 #include "nv_path.h"
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,7 +30,25 @@ static AudioObjectID pick(const char *uid, int input) {
     return (d != kAudioObjectUnknown && !nv_device_is_nivox(d)) ? d : kAudioObjectUnknown;
 }
 
-typedef struct { int enabled; nv_path path; int open; AudioObjectID want_in, want_out; } slot;
+static _Atomic uint64_t topology_generation;
+static OSStatus topology_changed(AudioObjectID object, UInt32 count,
+                                 const AudioObjectPropertyAddress *addresses, void *context) {
+    (void)object; (void)count; (void)addresses; (void)context;
+    atomic_fetch_add_explicit(&topology_generation, 1, memory_order_relaxed);
+    return noErr;
+}
+
+typedef struct {
+    int enabled; nv_path path; int open;
+    nv_endpoint_state input, output;
+    uint64_t generation;
+} slot;
+
+static int needs_restart(const slot *s, AudioObjectID in, AudioObjectID out) {
+    nv_endpoint_state i = nv_device_state(in, 1), o = nv_device_state(out, 0);
+    return s->generation != atomic_load_explicit(&topology_generation, memory_order_relaxed) ||
+           nv_endpoint_changed(&s->input, &i) || nv_endpoint_changed(&s->output, &o);
+}
 
 static int open_slot(slot *s, const char *name, AudioObjectID in, uint32_t in_ch, AudioObjectID out,
                      uint32_t out_ch, const nv_path_options *o) {
@@ -40,12 +59,14 @@ static int open_slot(slot *s, const char *name, AudioObjectID in, uint32_t in_ch
         fprintf(stderr, "{\"event\":\"error\",\"detail\":\"%s\"}\n", err);
         return -1;
     }
-    s->open = 1; s->want_in = in; s->want_out = out;
+    s->open = 1; s->input = nv_device_state(in, 1); s->output = nv_device_state(out, 0);
+    s->generation = atomic_load_explicit(&topology_generation, memory_order_relaxed);
     fprintf(stderr, "{\"event\":\"started\",\"path\":\"%s\",\"target\":%u}\n", name, s->path.target_fill);
     return 0;
 }
 
 int main(int argc, char **argv) {
+    nv_host_time_init();
     const char *mic_uid = NULL, *out_uid = NULL;
     int use_mic = 1, use_speaker = 1;
     float mic_strength = 1.f, spk_strength = 1.f;
@@ -73,6 +94,12 @@ int main(int argc, char **argv) {
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    AudioObjectPropertyAddress watches[] = {
+        {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioHardwarePropertyServiceRestarted, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+    };
+    for (size_t i = 0; i < sizeof watches / sizeof watches[0]; i++)
+        AudioObjectAddPropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL);
     nv_path_options mo = {mic_strength, buffer, 10}, so = {spk_strength, buffer, 10};
     slot mic, spk;
     memset(&mic, 0, sizeof mic); memset(&spk, 0, sizeof spk);
@@ -80,23 +107,24 @@ int main(int argc, char **argv) {
     int rc = 0;
     double elapsed = 0;
     while (!stop_flag && (seconds <= 0 || elapsed < seconds)) {
-        /* (Re)build paths when a device changes or dies, e.g. headset unplugged. */
+        /* Resolve hidden IDs every poll: coreaudiod may replace them after restart. */
+        feed = nv_device_for_uid(NV_UID_MIC_FEED); ret = nv_device_for_uid(NV_UID_SPEAKER_RETURN);
         if (mic.enabled) {
             AudioObjectID in = pick(mic_uid, 1);
-            if (mic.open && (in != mic.want_in || !nv_device_alive(mic.want_in))) {
+            if (mic.open && needs_restart(&mic, in, feed)) {
                 nv_path_close(&mic.path); mic.open = 0;
                 fprintf(stderr, "{\"event\":\"restart\",\"path\":\"mic\"}\n");
             }
-            if (!mic.open && in != kAudioObjectUnknown)
+            if (!mic.open && in != kAudioObjectUnknown && feed != kAudioObjectUnknown)
                 open_slot(&mic, "mic", in, 1, feed, 1, &mo);
         }
         if (spk.enabled) {
             AudioObjectID out = pick(out_uid, 0);
-            if (spk.open && (out != spk.want_out || !nv_device_alive(spk.want_out))) {
+            if (spk.open && needs_restart(&spk, ret, out)) {
                 nv_path_close(&spk.path); spk.open = 0;
                 fprintf(stderr, "{\"event\":\"restart\",\"path\":\"speaker\"}\n");
             }
-            if (!spk.open && out != kAudioObjectUnknown) {
+            if (!spk.open && out != kAudioObjectUnknown && ret != kAudioObjectUnknown) {
                 uint32_t ch = nv_device_channels(out, 0);
                 open_slot(&spk, "speaker", ret, 2, out, ch >= 2 ? 2 : 1, &so);
             }
@@ -111,6 +139,8 @@ int main(int argc, char **argv) {
             fputs("]}\n", stderr);
         }
     }
+    for (size_t i = 0; i < sizeof watches / sizeof watches[0]; i++)
+        AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL);
     if (mic.open) nv_path_close(&mic.path);
     if (spk.open) nv_path_close(&spk.path);
     fprintf(stderr, "{\"event\":\"stopped\"}\n");

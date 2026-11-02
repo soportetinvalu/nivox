@@ -4,6 +4,7 @@
 #include "nv_hal.h"
 #include <AudioToolbox/AudioToolbox.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -97,6 +98,30 @@ int nv_device_set_buffer_frames(AudioObjectID dev, uint32_t frames) {
     return AudioObjectSetPropertyData(dev, &a, 0, NULL, sizeof v, &v) == noErr ? 0 : -1;
 }
 
+nv_endpoint_state nv_device_state(AudioObjectID dev, int input) {
+    nv_endpoint_state s = {0};
+    s.id = dev; s.alive = nv_device_alive(dev); s.rate = nv_device_rate(dev);
+    s.channels = nv_device_channels(dev, input);
+    AudioObjectPropertyAddress a = addr(kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal);
+    UInt32 size = sizeof s.buffer;
+    if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &s.buffer) != noErr) s.buffer = 0;
+    a = addr(kAudioDevicePropertyStreams, input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput);
+    size = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &a, 0, NULL, &size) != noErr || !size) { s.alive = 0; return s; }
+    AudioStreamID *streams = malloc(size);
+    s.format_hash = 1469598103934665603ULL;
+    if (!streams || AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, streams) != noErr) s.alive = 0;
+    else for (UInt32 i = 0; i < size / sizeof *streams; i++) {
+        AudioStreamBasicDescription f = {0}; UInt32 fs = sizeof f;
+        AudioObjectPropertyAddress fa = addr(kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal);
+        if (AudioObjectGetPropertyData(streams[i], &fa, 0, NULL, &fs, &f) != noErr) { s.alive = 0; break; }
+        const unsigned char *bytes = (const unsigned char *)&f;
+        for (size_t j = 0; j < sizeof f; j++) s.format_hash = (s.format_hash ^ bytes[j]) * 1099511628211ULL;
+    }
+    free(streams);
+    return s;
+}
+
 static void json_str(FILE *o, const char *s) {
     fputc('"', o);
     for (; *s; s++) {
@@ -130,10 +155,13 @@ void nv_list_devices_json(FILE *o) {
     fputs("]\n", o);
 }
 
+static mach_timebase_info_data_t timebase;
+static pthread_once_t timebase_once = PTHREAD_ONCE_INIT;
+static void init_timebase(void) { mach_timebase_info(&timebase); }
+void nv_host_time_init(void) { pthread_once(&timebase_once, init_timebase); }
+/* Read-only on IO threads: initialization is completed before IO starts. */
 uint64_t nv_host_to_ns(uint64_t t) {
-    static mach_timebase_info_data_t tb;
-    if (tb.denom == 0) mach_timebase_info(&tb);
-    return (uint64_t)((__uint128_t)t * tb.numer / tb.denom);
+    return (uint64_t)((__uint128_t)t * timebase.numer / timebase.denom);
 }
 uint64_t nv_now_ns(void) { return nv_host_to_ns(mach_absolute_time()); }
 
@@ -175,6 +203,7 @@ static OSStatus output_proc(void *ref, AudioUnitRenderActionFlags *flags, const 
 #define TRY(x) do { if ((st = (x)) != noErr) goto fail; } while (0)
 
 nv_io *nv_io_open(AudioObjectID dev, int input, uint32_t ch, nv_io_cb cb, void *ctx, OSStatus *err) {
+    nv_host_time_init();
     OSStatus st = kAudio_ParamError;
     nv_io *io = calloc(1, sizeof *io);
     if (!io || dev == kAudioObjectUnknown || ch < 1 || ch > 8 || !cb) goto fail;

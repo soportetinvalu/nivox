@@ -85,6 +85,28 @@ jobs:
           rc=0; "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 4 2> "$out/cli-smoke.jsonl" || rc=$?
           cat "$out/cli-smoke.jsonl"
           [[ "$rc" == "0" ]] && grep -q '"event":"started"' "$out/cli-smoke.jsonl" || { echo 'CLI smoke failed'; exit 1; }
+      - name: Recover virtual paths after coreaudiod restart (runner only)
+        shell: bash
+        run: |
+          [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || exit 1
+          out=build/callaudio-mac
+          "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 18 2> "$out/cli-recovery.jsonl" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          sleep 4
+          grep -q '"event":"started"' "$out/cli-recovery.jsonl"
+          sudo killall coreaudiod
+          wait "$pid"
+          trap - EXIT
+          python3 - "$out/cli-recovery.jsonl" <<'PY'
+          import json, sys
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          assert sum(e.get('event') == 'started' for e in events) >= 2, events
+          assert any(e.get('event') == 'restart' for e in events), events
+          stats = [e for e in events if e.get('event') == 'stats' and e['paths']]
+          assert stats and stats[-1]['paths'][0]['pushed'] > 0 and stats[-1]['paths'][0]['pulled'] > 0, events
+          print(json.dumps({'recovered_after_coreaudiod_restart': True}))
+          PY
       - name: Protected uninstall (runner only)
         if: always()
         shell: bash
@@ -115,6 +137,7 @@ jobs:
             build/callaudio-mac/devices.json
             build/callaudio-mac/e2e.json
             build/callaudio-mac/cli-smoke.jsonl
+            build/callaudio-mac/cli-recovery.jsonl
             build/callaudio-mac/coreaudio.log
             build/callaudio-mac/*.log
           if-no-files-found: warn
