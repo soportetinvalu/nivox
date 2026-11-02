@@ -10,6 +10,6 @@
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
-<key>NSMicrophoneUsageDescription</key><string>Grabar una prueba local de hasta 15 segundos para comparar el micrófono original con SpeexDSP. Sin envío a servidores.</string>
+<key>NSMicrophoneUsageDescription</key><string>Procesar localmente el micrófono y el audio de llamadas con SpeexDSP a través de los dispositivos Nivox. La prueba A/B solo graba al solicitarlo. Sin envío a servidores.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

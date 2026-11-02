@@ -3,7 +3,7 @@
 
 linux: SpeexDSP static + core tests (release with RT-allocation guard, ASan+UBSan, TSan).
 mac:   (Darwin arm64 only) core tests, libASPL, NivoxAudio.driver, nivox-callaudio,
-       nv-e2e, ad hoc signatures and protected ZIP installer. Never installs anything.
+       nv-e2e, integrated Nivox.app, ad hoc signatures and protected ZIP installer. Never installs anything.
 """
 # SPDX-License-Identifier: MIT
 import argparse
@@ -22,6 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]  # repo root
 CA = ROOT / 'callaudio'
+sys.path.insert(0, str(ROOT))
+from ci.call_audio_build import test_control
 SPEEX = ROOT / 'vendor/speexdsp-1.2.1.tar.gz'
 SPEEX_SHA = '8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d'
 ASPL = ROOT / 'vendor/libASPL-3.1.2.tar.gz'
@@ -99,6 +101,7 @@ def audit_macho(run, binary):
 def linux(run, out, report):
     cc = shutil.which('cc') or 'cc'
     report['compiler'] = run([cc, '--version']).splitlines()[0]
+    report['call_control_tests'] = last_json(test_control(run, out, cc, ['-O2']))
     lib, sinc = build_speex(run, out, cc, ['-O2', '-fPIC'], 'release')
     exe = out / 'test_core'
     wrap = ['-DWRAP_ALLOC'] + ['-Wl,--wrap=' + f for f in ['malloc', 'calloc', 'realloc', 'free']]
@@ -199,9 +202,14 @@ def mac(run, out, report):
     if not report['mac_clock_stress'].get('ok'):
         raise RuntimeError('Mac host-time concurrent read test failed')
     report['tools'] = tools
-    # ZIP (driver + tools + scripts + notices), re-verified after extraction
+    # Build the actual UI against the in-process engine; no install or launch.
+    app_out = out / 'app-build'
+    run([sys.executable, ROOT / 'build.py', '--target', 'macapp', '--out', app_out])
+    report['app_build'] = json.loads((app_out / 'report.json').read_text())
+    # ZIP (app + driver + tools + scripts + notices), re-verified after extraction.
     stage = out / 'Nivox-CallAudio'
     stage.mkdir()
+    shutil.copytree(app_out / 'Nivox.app', stage / 'Nivox.app', symlinks=True)
     shutil.copytree(drv, stage / 'NivoxAudio.driver', symlinks=True)
     for name in tools:
         shutil.copy2(out / name, stage / name)
@@ -214,8 +222,8 @@ def mac(run, out, report):
     ex.mkdir()
     run(['ditto', '-x', '-k', zip_path, ex])
     run(['codesign', '--verify', '--strict', '--verbose=2', ex / 'Nivox-CallAudio/NivoxAudio.driver'])
-    # A direct-payload PKG replaces an existing installation before postinstall;
-    # disable it until it can provide the same protected transaction as the ZIP.
+    run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', ex / 'Nivox-CallAudio/Nivox.app'])
+    # Direct-payload PKG stays disabled: it bypasses protected replacement.
     report.update(zip_sha256=digest(zip_path), pkg_status='disabled: unsafe direct payload replacement',
                   signature='ad-hoc (not Developer ID, not notarized)')
 

@@ -15,6 +15,7 @@ import sys
 import tarfile
 from pathlib import Path
 from ci.icon_assets import validate_assets
+from ci.call_audio_build import build_app_library, test_control, CONTROL_SOURCES
 
 HERE = Path(__file__).resolve().parent
 SHA = '8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d'
@@ -116,7 +117,11 @@ def main():
                                          HERE / 'App/NoiseProbeApp.swift', HERE / 'App/Info.plist',
                                          HERE / 'App/Entitlements.plist', HERE / 'App/Assets/Nivox.icns',
                                          HERE / 'App/Assets/Nivox-original.png', HERE / 'App/Assets/icon-manifest.json',
-                                         HERE / 'ci/icon_assets.py']}}
+                                         HERE / 'ci/icon_assets.py', HERE / 'ci/call_audio_build.py',
+                                         HERE / 'App/CallAudio.swift', HERE / 'callaudio/control/nv_call.h',
+                                         HERE / 'callaudio/control/module.modulemap',
+                                         HERE / 'callaudio/tests/test_call_control.c',
+                                         *CONTROL_SOURCES]}}
     with (out / 'commands.log').open('x') as log:
         def run(command, cwd=HERE):
             command = list(map(str, command))
@@ -146,6 +151,7 @@ def main():
             common = [*flags, '-std=c11', '-Wall', '-Wextra', '-Werror',
                       '-I' + str(HERE / 'include'), '-I' + str(HERE / 'CNoise/include'),
                       '-I' + str(source / 'include'), '-I' + str(upstream / 'include/speex')]
+            report['call_control_tests'] = json.loads(test_control(run, out, cc, flags).splitlines()[-1])
             objects = []
             for src in [HERE / 'src/speex_noise.c', HERE / 'CNoise/NoiseProbe.c']:
                 obj = out / (src.stem + '.o')
@@ -189,8 +195,12 @@ def main():
                     shutil.copy2(HERE / 'App/Assets' / name, resources / name)
                 if validate_assets(resources) != icon:
                     raise RuntimeError('Bundled icon differs from original branding')
-                run([*swift_flags, HERE / 'App/NoiseProbeApp.swift', own, speex,
-                     '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation', '-o', exe])
+                call_library = build_app_library(run, out, cc, common)
+                run([*swift_flags, '-I', HERE / 'callaudio/control',
+                     HERE / 'App/NoiseProbeApp.swift', HERE / 'App/CallAudio.swift',
+                     call_library, own, speex, '-framework', 'CoreAudio', '-framework', 'AudioToolbox',
+                     '-framework', 'CoreFoundation', '-framework', 'SwiftUI', '-framework', 'AppKit',
+                     '-framework', 'AVFoundation', '-o', exe])
                 for src, name in [(HERE / 'LICENSE', 'Own-code-MIT.txt'), (source / 'COPYING', 'SpeexDSP-COPYING.txt'),
                                   (HERE / 'LICENSES.md', 'LICENSES.md'), (HERE / 'README.md', 'README-Speex.md')]:
                     shutil.copy2(src, resources / name)

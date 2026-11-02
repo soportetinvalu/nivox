@@ -20,6 +20,17 @@ FILES = [
     'tests/stream_test.c', 'tests/test_engine.py', 'tests/test_integration.py', 'tests/test_delivery.py',
     'ci/FrameworkSmoke.swift', 'ci/icon_assets.py', 'ci/export_sources.py',
     'vendor/speexdsp-1.2.1.tar.gz', 'docs/RESULTADOS.md', 'docs/ACEPTACION_MAC.md', 'docs/INTEGRACION.md',
+    'App/CallAudio.swift', 'ci/call_audio_build.py', 'tests/test_call_audio.py',
+    'callaudio/control/nv_call.h', 'callaudio/control/nv_call.c', 'callaudio/control/module.modulemap',
+    'callaudio/mac/nv_call_mac.c', 'callaudio/mac/nv_hal.h', 'callaudio/mac/nv_hal.c',
+    'callaudio/mac/nv_path.h', 'callaudio/mac/nv_path.c', 'callaudio/mac/nivox_callaudio.c',
+    'callaudio/mac/nv_e2e.c', 'callaudio/core/nv_core.h', 'callaudio/core/nv_bridge.c',
+    'callaudio/core/nv_driver_core.c', 'callaudio/tests/test_core.c', 'callaudio/tests/test_call_control.c',
+    'callaudio/driver/Info.plist', 'callaudio/driver/NivoxAudioDriver.cpp',
+    'callaudio/installer/install-driver.sh', 'callaudio/installer/uninstall-driver.sh',
+    'callaudio/installer/postinstall', 'callaudio/tools/build_callaudio.py',
+    'callaudio/README.md', 'callaudio/LICENSES.md', 'docs/CALL_AUDIO_UI.md',
+    'vendor/libASPL-3.1.2.tar.gz', '.github/workflows/build-callaudio-arm64.yml',
 ]
 
 

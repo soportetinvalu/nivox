@@ -111,6 +111,7 @@ class DeliveryTests(unittest.TestCase):
         (f/'ci').mkdir()
         shutil.copyfile(ROOT/'build.py', f/'build.py')
         shutil.copyfile(ROOT/'ci/icon_assets.py', f/'ci/icon_assets.py')
+        shutil.copyfile(ROOT/'ci/call_audio_build.py', f/'ci/call_audio_build.py')
         (f/'vendor/speexdsp-1.2.1.tar.gz').write_bytes(b'corrupted')
         p = f/'build/forbidden'
         self.reject([sys.executable,f/'build.py','--target','linux','--out',p], 'SHA-256 mismatch', p)

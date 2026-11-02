@@ -1,4 +1,13 @@
-# Nivox · SpeexDSP · prototipo local Apple Silicon
+# Nivox · audio local Apple Silicon
+
+**Integración de llamadas nueva, aún sin validación Mac:** la pestaña Llamadas conecta
+el motor CoreAudio/SpeexDSP dentro de Nivox.app, con encendido/apagado, selección
+de hardware, estado basado en callbacks y errores. Requiere instalar el driver
+Nivox por separado. Véase [integración y aceptación](docs/CALL_AUDIO_UI.md) y
+[arquitectura de llamadas](callaudio/README.md). La compilación Mac citada abajo
+corresponde únicamente al prototipo anterior, no verifica estos cambios.
+
+## Prototipo A/B anterior (conservado en otra pestaña)
 
 Entrega integrada de fuentes: branding Nivox e icono original aportado por el usuario, con **SpeexDSP 1.2.1 real**, estático y sin pesos. No incluye Neep, RNNoise, modelos, audio privado ni credenciales. No instala drivers, servicios ni dispositivos. La inferencia y el build local no necesitan descargar dependencias; GitHub Actions sí necesita red para checkout, herramientas y artifacts.
 

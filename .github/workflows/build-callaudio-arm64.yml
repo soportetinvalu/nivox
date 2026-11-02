@@ -20,6 +20,8 @@ jobs:
           python-version: '3.12'
       - name: Installer transaction regression tests (sandbox, no HAL installation)
         run: python3 callaudio/tests/test_installer.py
+      - name: Call controller lifecycle (release, ASan+UBSan, readiness counterprobe)
+        run: python3 tests/test_call_audio.py --out build/call-ui-control
       - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)
         run: python3 callaudio/tools/build_callaudio.py --target linux --out build/callaudio-linux
       - name: Retain evidence
@@ -31,6 +33,8 @@ jobs:
             build/callaudio-linux/report.json
             build/callaudio-linux/commands.log
             build/callaudio-linux/SHA256SUMS
+            build/call-ui-control/report.json
+            build/call-ui-control/commands.log
           if-no-files-found: error
           retention-days: 7
   mac-arm64:
@@ -51,7 +55,7 @@ jobs:
         run: |
           [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
           [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]] || { echo 'refusing: runner already has Nivox installed'; exit 1; }
-      - name: Require Apple Silicon, build driver + engine, sign ad hoc, package
+      - name: Require Apple Silicon, build app + driver + engine, sign ad hoc, package
         shell: bash
         run: |
           [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || { echo 'BLOQUEADO: Darwin arm64 required'; exit 1; }
@@ -140,5 +144,7 @@ jobs:
             build/callaudio-mac/cli-recovery.jsonl
             build/callaudio-mac/coreaudio.log
             build/callaudio-mac/*.log
+            build/callaudio-mac/app-build/report.json
+            build/callaudio-mac/app-build/commands.log
           if-no-files-found: warn
           retention-days: 7

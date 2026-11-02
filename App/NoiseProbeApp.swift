@@ -7,7 +7,7 @@ import NoiseProbe
 private enum ProbeBuild {
     static let canCapture = true
     static let subtitle = "SpeexDSP 1.2.1 · supresión −15 dB · sin pesos · experimental"
-    static let windowTitle = "Nivox · prototipo experimental"
+    static let windowTitle = "Nivox · audio local"
     static let instructions = "Graba hasta 15 segundos y compara original/limpio. Solo 48 kHz; canal 1. No crea un micrófono virtual ni modifica dispositivos."
 }
 
@@ -226,8 +226,28 @@ enum ProbeError: LocalizedError {
 
 @main @MainActor struct NivoxApp: App {
     @StateObject private var probe = AudioProbe()
+    @StateObject private var calls = CallAudioModel()
+    @State private var tab = 0
     var body: some Scene {
         WindowGroup(ProbeBuild.windowTitle) {
+            TabView(selection: $tab) {
+                CallAudioView(audio: calls).tabItem { Text("Llamadas") }.tag(0)
+                probeView.disabled(calls.busy || calls.enabled).tabItem { Text("Prueba A/B") }.tag(1)
+            }
+            .onChange(of: tab) { _ in
+                // Tests and continuous call routing must never capture/play together.
+                calls.stop()
+                probe.stop(discard: true, reason: "Cambio de pestaña: prueba detenida.")
+                probe.stopPlayback()
+            }
+            .onDisappear {
+                calls.stop(reason: "Ventana cerrada: procesamiento detenido.")
+                probe.stop(discard: true, reason: "Ventana cerrada: captura detenida.")
+                probe.stopPlayback()
+            }
+        }
+    }
+    private var probeView: some View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Nivox").font(.largeTitle.bold())
                 Text(ProbeBuild.subtitle).foregroundColor(.secondary)
@@ -255,10 +275,5 @@ enum ProbeError: LocalizedError {
                 Text("Sin red, pesos, grabación automática, AGC ni cancelación de eco. Audio temporal en RAM; WAV solo al exportar. Calidad limitada con ráfagas. No usar aún en llamadas.")
                     .font(.footnote).foregroundColor(.secondary)
             }.padding(24).frame(minWidth: 780, minHeight: 390)
-                .onDisappear {
-                    probe.stop(discard: true, reason: "Ventana cerrada: captura detenida.")
-                    probe.stopPlayback()
-                }
-        }
     }
 }
