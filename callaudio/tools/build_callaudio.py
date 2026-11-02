@@ -3,7 +3,7 @@
 
 linux: SpeexDSP static + core tests (release with RT-allocation guard, ASan+UBSan, TSan).
 mac:   (Darwin arm64 only) core tests, libASPL, NivoxAudio.driver, nivox-callaudio,
-       nv-e2e, ad hoc signatures, ZIP + unsigned PKG. Never installs anything.
+       nv-e2e, ad hoc signatures and protected ZIP installer. Never installs anything.
 """
 # SPDX-License-Identifier: MIT
 import argparse
@@ -181,7 +181,7 @@ def mac(run, out, report):
         tools[name] = audit_macho(run, t)
         run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', t])
     report['tools'] = tools
-    # ZIP (driver + tools + scripts + notices) and unsigned PKG; both re-verified after extraction
+    # ZIP (driver + tools + scripts + notices), re-verified after extraction
     stage = out / 'Nivox-CallAudio'
     stage.mkdir()
     shutil.copytree(drv, stage / 'NivoxAudio.driver', symlinks=True)

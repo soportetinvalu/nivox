@@ -72,4 +72,8 @@ fi
 /usr/bin/killall coreaudiod 2>/dev/null || true
 committed=1
 printf 'Completed %s; retained backup: %s/previous.driver\n' "$mode" "$txn"
-printf 'To reverse: sudo ./restore-driver.sh %q/previous.driver\n' "$txn"
+if [[ "$old" == 1 ]]; then
+    printf 'To reverse: sudo bash ./restore-driver.sh %q/previous.driver\n' "$txn"
+elif [[ "$published" == 1 ]]; then
+    echo 'To reverse initial installation: sudo bash ./uninstall-driver.sh'
+fi
