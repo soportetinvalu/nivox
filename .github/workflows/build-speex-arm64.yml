@@ -1,13 +1,22 @@
 name: Nivox integrated SpeexDSP arm64 (manual, no release)
 on:
   workflow_dispatch:
+    inputs:
+      callaudio:
+        description: Validate experimental virtual call audio instead of the app
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
   group: nivox-speex-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  callaudio:
+    if: inputs.callaudio
+    uses: ./.github/workflows/build-callaudio-arm64.yml
   linux:
+    if: ${{ !inputs.callaudio }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

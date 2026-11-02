@@ -1,6 +1,7 @@
 name: Nivox call audio arm64 (manual, no release)
 on:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
@@ -32,6 +33,7 @@ jobs:
           retention-days: 7
   mac-arm64:
     needs: linux-core
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-26
     timeout-minutes: 30
     steps:
@@ -41,6 +43,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Require GitHub-hosted ephemeral Apple Silicon runner
+        shell: bash
+        run: |
+          [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
+          [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]] || { echo 'refusing: runner already has Nivox installed'; exit 1; }
       - name: Require Apple Silicon, build driver + engine, sign ad hoc, package
         shell: bash
         run: |
@@ -51,9 +58,13 @@ jobs:
         run: |
           [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
           out=build/callaudio-mac
-          sudo ditto "$out/NivoxAudio.driver" /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver
-          sudo chown -R root:wheel /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver
-          sudo killall coreaudiod || true
+          stage="$out/zip-extracted/Nivox-CallAudio"
+          sudo bash "$stage/install-driver.sh" | tee "$out/install.log"
+          sudo bash "$stage/install-driver.sh" | tee "$out/replace.log"
+          backup="$(python3 -c 'import re,sys; print(re.search(r"retained backup: (.*)", open(sys.argv[1]).read())[1])' "$out/replace.log")"
+          sudo test -d "$backup"
+          sudo bash "$stage/restore-driver.sh" "$backup" | tee "$out/restore.log"
+          sudo test -d "$backup"
           found=0
           for i in $(seq 1 40); do
             if "$out/nivox-callaudio" --list > "$out/devices.json" 2>/dev/null && grep -q 'nivox.microphone.v1' "$out/devices.json"; then found=1; break; fi
@@ -66,6 +77,17 @@ jobs:
           rc=0; "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 4 2> "$out/cli-smoke.jsonl" || rc=$?
           cat "$out/cli-smoke.jsonl"
           [[ "$rc" == "0" ]] && grep -q '"event":"started"' "$out/cli-smoke.jsonl" || { echo 'CLI smoke failed'; exit 1; }
+      - name: Protected uninstall (runner only)
+        if: always()
+        shell: bash
+        run: |
+          [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || exit 1
+          out=build/callaudio-mac
+          stage="$out/zip-extracted/Nivox-CallAudio"
+          if [[ -f "$out/install.log" && -d /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]]; then
+            sudo bash "$stage/uninstall-driver.sh" | tee "$out/uninstall.log"
+            [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]]
+          fi
       - name: CoreAudio logs for diagnosis
         if: always()
         shell: bash
@@ -79,7 +101,6 @@ jobs:
           name: nivox-callaudio-arm64-adhoc-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/callaudio-mac/Nivox-CallAudio-arm64-adhoc.zip
-            build/callaudio-mac/NivoxAudio-driver-unsigned.pkg
             build/callaudio-mac/report.json
             build/callaudio-mac/commands.log
             build/callaudio-mac/SHA256SUMS
@@ -87,5 +108,6 @@ jobs:
             build/callaudio-mac/e2e.json
             build/callaudio-mac/cli-smoke.jsonl
             build/callaudio-mac/coreaudio.log
+            build/callaudio-mac/*.log
           if-no-files-found: warn
           retention-days: 7

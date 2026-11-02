@@ -187,7 +187,7 @@ def mac(run, out, report):
     shutil.copytree(drv, stage / 'NivoxAudio.driver', symlinks=True)
     for name in tools:
         shutil.copy2(out / name, stage / name)
-    for s in ['install-driver.sh', 'uninstall-driver.sh']:
+    for s in ['install-driver.sh', 'uninstall-driver.sh', 'restore-driver.sh', 'manage-driver.sh']:
         shutil.copy2(CA / 'installer' / s, stage / s)
     shutil.copy2(CA / 'README.md', stage / 'README.md')
     zip_path = out / 'Nivox-CallAudio-arm64-adhoc.zip'
@@ -196,21 +196,9 @@ def mac(run, out, report):
     ex.mkdir()
     run(['ditto', '-x', '-k', zip_path, ex])
     run(['codesign', '--verify', '--strict', '--verbose=2', ex / 'Nivox-CallAudio/NivoxAudio.driver'])
-    pkgroot = out / 'pkgroot/Library/Audio/Plug-Ins/HAL'
-    pkgroot.mkdir(parents=True)
-    shutil.copytree(drv, pkgroot / 'NivoxAudio.driver', symlinks=True)
-    scripts = out / 'pkgscripts'
-    scripts.mkdir()
-    shutil.copy2(CA / 'installer/postinstall', scripts / 'postinstall')
-    os.chmod(scripts / 'postinstall', 0o755)
-    pkg = out / 'NivoxAudio-driver-unsigned.pkg'
-    run(['pkgbuild', '--root', out / 'pkgroot', '--scripts', scripts, '--identifier', DRIVER_ID + '.pkg',
-         '--version', '0.1.0', '--install-location', '/', pkg])
-    payload = run(['pkgutil', '--payload-files', pkg])
-    if 'Library/Audio/Plug-Ins/HAL/NivoxAudio.driver/Contents/MacOS/NivoxAudio' not in payload:
-        raise RuntimeError('pkg payload missing driver binary')
-    sig = run(['pkgutil', '--check-signature', pkg], check=False)
-    report.update(zip_sha256=digest(zip_path), pkg_sha256=digest(pkg), pkg_signature=sig.strip()[:300],
+    # A direct-payload PKG replaces an existing installation before postinstall;
+    # disable it until it can provide the same protected transaction as the ZIP.
+    report.update(zip_sha256=digest(zip_path), pkg_status='disabled: unsafe direct payload replacement',
                   signature='ad-hoc (not Developer ID, not notarized)')
 
 
