@@ -115,6 +115,7 @@ nv_endpoint_state nv_device_state(AudioObjectID dev, int input) {
         AudioStreamBasicDescription f = {0}; UInt32 fs = sizeof f;
         AudioObjectPropertyAddress fa = addr(kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal);
         if (AudioObjectGetPropertyData(streams[i], &fa, 0, NULL, &fs, &f) != noErr) { s.alive = 0; break; }
+        f.mReserved = 0; /* not part of the format identity */
         const unsigned char *bytes = (const unsigned char *)&f;
         for (size_t j = 0; j < sizeof f; j++) s.format_hash = (s.format_hash ^ bytes[j]) * 1099511628211ULL;
     }

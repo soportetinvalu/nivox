@@ -242,6 +242,7 @@ def main():
                TSAN_OPTIONS='halt_on_error=1')
     run = Runner(out, env)
     inputs = sorted([*CA.rglob('*.c'), *CA.rglob('*.h'), *CA.rglob('*.cpp'), *CA.rglob('*.plist'),
+                     *CA.rglob('*.sh'), *CA.rglob('*.entitlements'),
                      CA / 'tools/build_callaudio.py', ROOT / 'src/speex_noise.c', ROOT / 'include/christian_noise.h'])
     report = {'target': a.target, 'platform': platform.platform(), 'machine': platform.machine(),
               'input_hashes': {str(p.relative_to(ROOT)): digest(p) for p in inputs if p.is_file()},

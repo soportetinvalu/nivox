@@ -98,8 +98,13 @@ int main(int argc, char **argv) {
         {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
         {kAudioHardwarePropertyServiceRestarted, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
     };
-    for (size_t i = 0; i < sizeof watches / sizeof watches[0]; i++)
-        AudioObjectAddPropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL);
+    for (size_t i = 0; i < sizeof watches / sizeof watches[0]; i++) {
+        OSStatus st = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &watches[i], topology_changed, NULL);
+        if (st != noErr) {
+            fprintf(stderr, "{\"event\":\"error\",\"detail\":\"device/restart listener registration failed\",\"status\":%d}\n", (int)st);
+            return 4;
+        }
+    }
     nv_path_options mo = {mic_strength, buffer, 10}, so = {spk_strength, buffer, 10};
     slot mic, spk;
     memset(&mic, 0, sizeof mic); memset(&spk, 0, sizeof spk);

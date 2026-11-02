@@ -1,6 +1,6 @@
 # Nivox · audio de llamadas (micrófono y altavoz virtuales)
 
-Estado: **implementación inicial en curso, no es una entrega final**. El núcleo portable está probado en Linux. El driver, el motor CoreAudio y la prueba E2E están escritos, pero **no se han compilado ni ejecutado en macOS** (ver «Bloqueos»).
+Estado: **experimental, no es una entrega final**. El núcleo portable se prueba en Linux con sanitizers y contraprueba de denoiser mudo. La evidencia Mac requiere una ejecución del workflow sobre el SHA exacto y su reporte E2E: la existencia del código o un job Linux verde no demuestra audio CoreAudio funcional.
 
 ## Arquitectura mínima
 
@@ -47,11 +47,19 @@ Linux (`python3 callaudio/tools/build_callaudio.py --target linux --out build/<n
 - `nv_bridge`: simulación de 600 s por caso con deriva (±300, −150, +500, +80, 1500 y +40 ppm con bloques iguales) y tasas 48/44,1/16 kHz. Se exige 0 underruns/overflows, 0 glitches, residual de sinusoide < −60 dB, ppm efectivo igual al esperado y **0 asignaciones de memoria en push/pull** (`--wrap=malloc`). También comprueba la reducción de ruido blanco (> 6 dB), la latencia de impulso y dos hilos reales.
 - Las mismas pruebas en modo rápido con ASan+UBSan y con TSan (`setarch -R` solo para ese proceso).
 
-macOS: `.github/workflows/build-callaudio-arm64.yml` (manual) compila y firma ad hoc. Después instala el driver **solo en la VM efímera del runner**, ejecuta `nv-e2e` y una prueba de humo de la CLI, y sube el ZIP, el pkg sin firmar y la evidencia. **No se ha ejecutado** porque requiere push.
+macOS: `.github/workflows/build-callaudio-arm64.yml` compila en un runner Apple Silicon `macos-15`, verifica firma ad hoc y entitlement `audio-input`, y prueba lecturas concurrentes del reloj ya inicializado. Después instala el driver **solo en la VM efímera GitHub-hosted**, prueba rechazo de candidato inválido, sustitución, respaldo/restauración y desinstalación protegida. Ejecuta `nv-e2e`, conservación de señal modulada con denoise activo, rechazo explícito de silencio y recuperación de la CLI tras reiniciar coreaudiod. Retiene ZIP y logs incluso si falla; un artefacto retenido no significa E2E verde. No genera PKG.
+
+Si el workflow nuevo aún no está registrado en la rama predeterminada, se invoca sin modificarla mediante el workflow existente, con el input optativo añadido solo en la rama de trabajo:
+
+```sh
+gh workflow run build-speex-arm64.yml --ref fix/callaudio-safe-ci -f callaudio=true
+```
+
+Los cinco tests del instalador en Linux usan un sandbox y comandos de sistema sustituidos: prueban su transacción, **no** carga HAL ni firma Apple real. Las pruebas del monitor verifican cambios de ID, tasa, canales, buffer y formato físico; el hardware físico y los cambios reales de formato quedan fuera del CI virtual.
 
 ## Bloqueos y pendientes
 
-1. **Sin compilación ni ejecución Apple**: el host es Linux, sin SDK. El driver, el motor CoreAudio y el E2E no se han compilado nunca, así que pueden aparecer errores de compilación. Para resolverlo hace falta autorizar un push de esta rama y lanzar el workflow, o una Mac.
+1. **Solo cuenta evidencia Apple real**: el host de desarrollo es Linux, sin SDK. Consultar la ejecución manual de la rama y su SHA exacto; sus fallos no se sustituyen por comprobaciones de sintaxis ni stubs.
 2. En el runner, TCC/micrófono para capturar dispositivos virtuales es probable, pero no está garantizado (el runner preautoriza al agente de provisión). Si `nv-e2e` captura silencio, lo indicará.
 3. Ni micrófono, ni altavoces, ni Zoom/Meet/Teams reales, ni deriva física se pueden probar en CI: requieren la Mac del usuario.
 4. Producto: falta integrar el motor en Nivox.app (barra de menús, selector de dispositivos, inicio de sesión vía `SMAppService`, sin daemon), un instalador con UX, AEC (SpeexDSP `mdf` usando la ruta de altavoz como referencia) y un motor ML opcional.
