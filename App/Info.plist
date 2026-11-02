@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Nivox</string>
+<key>CFBundleIdentifier</key><string>local.christian.nivox.speex.experimental</string>
+<key>CFBundleName</key><string>Nivox</string>
+<key>CFBundleDisplayName</key><string>Nivox</string>
+<key>CFBundleIconFile</key><string>Nivox.icns</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Grabar una prueba local de hasta 15 segundos para comparar el micrófono original con SpeexDSP. Sin envío a servidores.</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>

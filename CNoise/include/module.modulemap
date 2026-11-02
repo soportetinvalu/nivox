@@ -1,0 +1,4 @@
+module NoiseProbe {
+    header "NoiseProbe.h"
+    export *
+}

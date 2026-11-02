@@ -1,0 +1,59 @@
+{
+  "brand": "Nivox",
+  "source_dimensions": [
+    1254,
+    1254
+  ],
+  "conversion": "Pillow 13.0.0; RGBA LANCZOS; no crop; full supplied image",
+  "rights": "User-supplied artwork; ownership/redistribution not independently verified; not covered by code MIT license.",
+  "files": {
+    "Nivox-original.png": "c493e3898244e0b27fe0e5ce4d4215c1908fc83421314c892cdd3ed8b8955a2e",
+    "Nivox.icns": "9511557b16733f118e58aee0c6a6f4c4796de26549a57a08c5ac70be2881c2c5"
+  },
+  "slots": {
+    "icp4": {
+      "pixels": 16,
+      "sha256": "bd982a8dbc81ef2664768de682461bc64b6ca6afda800dfd339821e6b0a4401e"
+    },
+    "icp5": {
+      "pixels": 32,
+      "sha256": "d10a44dcfbfc047609e86d9416593a42d3d062d68b707e1d52d8576fb108cb1f"
+    },
+    "icp6": {
+      "pixels": 64,
+      "sha256": "671079303d538d339f51b35247d8b08bb984bc6d720f0a400069501467ad21da"
+    },
+    "ic07": {
+      "pixels": 128,
+      "sha256": "12e5044551508691d1a80a726727f9aa205458e598a896bb9fadec419585da9a"
+    },
+    "ic08": {
+      "pixels": 256,
+      "sha256": "6a7cadb3fe8e73ade53f39a961963b52c22387d84e5dd55680901d45fe2da7e9"
+    },
+    "ic09": {
+      "pixels": 512,
+      "sha256": "1f84e808861625c52b712f11e7474991658553a2ffc04905b1bd220b07e8125e"
+    },
+    "ic10": {
+      "pixels": 1024,
+      "sha256": "112e32262d4229da6eba731d9196d5404f3c3ea9830903fbf9dbf489ecab27dd"
+    },
+    "ic11": {
+      "pixels": 32,
+      "sha256": "d10a44dcfbfc047609e86d9416593a42d3d062d68b707e1d52d8576fb108cb1f"
+    },
+    "ic12": {
+      "pixels": 64,
+      "sha256": "671079303d538d339f51b35247d8b08bb984bc6d720f0a400069501467ad21da"
+    },
+    "ic13": {
+      "pixels": 256,
+      "sha256": "6a7cadb3fe8e73ade53f39a961963b52c22387d84e5dd55680901d45fe2da7e9"
+    },
+    "ic14": {
+      "pixels": 512,
+      "sha256": "1f84e808861625c52b712f11e7474991658553a2ffc04905b1bd220b07e8125e"
+    }
+  }
+}

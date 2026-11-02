@@ -1,0 +1,78 @@
+name: Nivox integrated SpeexDSP arm64 (manual, no release)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nivox-speex-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, resolved via public API
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Real DSP and integration, then ASan + UBSan
+        run: |
+          python3 build.py --target linux --out build/linux-release
+          python3 build.py --target linux --sanitize --out build/linux-sanitize
+          python3 tests/test_delivery.py --out build/delivery-tests
+          python3 ci/export_sources.py --out build/public-sources
+      - name: Retain test evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nivox-integrated-linux-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/delivery-tests/report.json
+            build/public-sources/verification.json
+            build/linux-release/report.json
+            build/linux-release/commands.log
+            build/linux-release/SHA256SUMS
+            build/linux-release/stream_test
+            build/linux-release/unit-tests.json
+            build/linux-release/integration/report.json
+            build/linux-sanitize/report.json
+            build/linux-sanitize/commands.log
+            build/linux-sanitize/SHA256SUMS
+            build/linux-sanitize/stream_test
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+  mac-arm64:
+    needs: linux
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Require actual Apple Silicon and compile without device access
+        shell: bash
+        run: |
+          [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || { echo 'BLOQUEADO: actual Darwin arm64 required'; exit 1; }
+          python3 build.py --target macapp --out build/mac-arm64
+      - name: Retain local-test app and build evidence (not a Release)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nivox-arm64-experimental-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/mac-arm64/Nivox-arm64-experimental.zip
+            build/mac-arm64/report.json
+            build/mac-arm64/commands.log
+            build/mac-arm64/SHA256SUMS
+            build/mac-arm64/stream_test
+            build/mac-arm64/unit-tests.json
+            build/mac-arm64/integration/report.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
