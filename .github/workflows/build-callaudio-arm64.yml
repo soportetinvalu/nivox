@@ -20,6 +20,8 @@ jobs:
           python-version: '3.12'
       - name: Installer transaction regression tests (sandbox, no HAL installation)
         run: python3 callaudio/tests/test_installer.py
+      - name: Pinned dependency compatibility regression (no SDK or installation)
+        run: python3 callaudio/tests/test_build_compat.py
       - name: Call controller lifecycle (release, ASan+UBSan, readiness counterprobe)
         run: python3 tests/test_call_audio.py --out build/call-ui-control
       - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)

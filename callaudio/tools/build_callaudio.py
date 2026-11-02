@@ -135,6 +135,32 @@ def linux(run, out, report):
             raise RuntimeError(f'{k} tests failed')
 
 
+def fix_aspl_stream_format(aspl):
+    """Order libASPL 3.1.2 designators for current Clang without muting warnings.
+
+    Called only after safe_extract has verified the pinned vendor archive.
+    Fail closed if that exact initializer changes; preserve every field value.
+    """
+    header = aspl / 'include/aspl/Stream.hpp'
+    before = header.read_text()
+    old = '''        .mBitsPerChannel = 16,
+        .mChannelsPerFrame = 2,
+        .mBytesPerFrame = 4,
+        .mFramesPerPacket = 1,
+        .mBytesPerPacket = 4,'''
+    new = '''        .mBytesPerPacket = 4,
+        .mFramesPerPacket = 1,
+        .mBytesPerFrame = 4,
+        .mChannelsPerFrame = 2,
+        .mBitsPerChannel = 16,'''
+    if before.count(old) != 1:
+        raise RuntimeError('unexpected libASPL 3.1.2 Stream.hpp initializer; refusing compatibility patch')
+    original_sha = digest(header)
+    header.write_text(before.replace(old, new, 1))
+    return {'path': 'include/aspl/Stream.hpp', 'original_sha256': original_sha,
+            'patched_sha256': digest(header), 'change': 'designator order only'}
+
+
 def mac(run, out, report):
     sdk = run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()
     report['sdk'] = run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip()
@@ -148,6 +174,7 @@ def mac(run, out, report):
     # libASPL (MIT), compiled from the pinned release tarball
     safe_extract(ASPL, out, ASPL_SHA)
     aspl = out / 'libASPL-3.1.2'
+    report['libaspl_compatibility'] = fix_aspl_stream_format(aspl)
     objs = []
     for src in sorted((aspl / 'src').glob('*.cpp')):
         o = out / 'aspl-obj' / (src.stem + '.o')
