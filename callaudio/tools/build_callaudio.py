@@ -98,6 +98,13 @@ def audit_macho(run, binary):
     return {'arch': arch, 'deps': [d.strip().split(' (')[0] for d in deps]}
 
 
+def test_thread_stall(run, exe):
+    result = last_json(run([exe, '--threads-only', '--stall-producer'], check=False))
+    if result.get('ok') is not False or result.get('threaded_underruns', 0) <= 1:
+        raise RuntimeError('threaded underrun oracle accepted repeated producer stalls')
+    return result
+
+
 def linux(run, out, report):
     cc = shutil.which('cc') or 'cc'
     report['compiler'] = run([cc, '--version']).splitlines()[0]
@@ -107,6 +114,7 @@ def linux(run, out, report):
     wrap = ['-DWRAP_ALLOC'] + ['-Wl,--wrap=' + f for f in ['malloc', 'calloc', 'realloc', 'free']]
     run([cc, '-O2', *WARN, *INC, *sinc, CA / 'tests/test_core.c', *CORE_C, lib, '-lm', '-pthread', *wrap, '-o', exe])
     report['release'] = last_json(run([exe]))
+    report['thread_stall_countertest'] = test_thread_stall(run, exe)
     report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
     if report['muted_denoiser_countertest'].get('ok') is not False:
         raise RuntimeError('signal-preservation test accepted a muted denoiser')
@@ -191,8 +199,17 @@ def mac(run, out, report):
         if ent.get('com.apple.security.device.audio-input') is not True:
             raise RuntimeError(f'{name}: signed audio-input entitlement missing')
         tools[name]['audio_input_entitlement'] = True
-    # Compile/audit all Apple code before executing tests, so failures retain build evidence.
+    # Compile/audit the real UI before running timing-sensitive core tests.
+    # A core failure must not conceal Swift compilation or signing failures.
+    report['tools'] = tools
+    app_out = out / 'app-build'
+    run([sys.executable, ROOT / 'build.py', '--target', 'macapp', '--out', app_out])
+    report['app_build'] = json.loads((app_out / 'report.json').read_text())
+    for key in ['ok', 'mac_compiled', 'archive_roundtrip_verified', 'signed_audio_input', 'extracted_audio_input']:
+        if report['app_build'].get(key) is not True:
+            raise RuntimeError(f'app build did not prove {key}')
     report['core_tests'] = last_json(run([exe]))
+    report['thread_stall_countertest'] = test_thread_stall(run, exe)
     report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
     if report['muted_denoiser_countertest'].get('ok') is not False:
         raise RuntimeError('signal-preservation test accepted a muted denoiser')
@@ -201,14 +218,6 @@ def mac(run, out, report):
     report['mac_clock_stress'] = last_json(run([out / 'nv-hal-test']))
     if not report['mac_clock_stress'].get('ok'):
         raise RuntimeError('Mac host-time concurrent read test failed')
-    report['tools'] = tools
-    # Build the actual UI against the in-process engine; no install or launch.
-    app_out = out / 'app-build'
-    run([sys.executable, ROOT / 'build.py', '--target', 'macapp', '--out', app_out])
-    report['app_build'] = json.loads((app_out / 'report.json').read_text())
-    for key in ['ok', 'mac_compiled', 'archive_roundtrip_verified', 'signed_audio_input', 'extracted_audio_input']:
-        if report['app_build'].get(key) is not True:
-            raise RuntimeError(f'app build did not prove {key}')
     # ZIP (app + driver + tools + scripts + notices), re-verified after extraction.
     stage = out / 'Nivox-CallAudio'
     stage.mkdir()

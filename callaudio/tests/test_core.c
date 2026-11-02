@@ -17,6 +17,8 @@
 #include <time.h>
 #ifdef __APPLE__
 #include <mach/mach_time.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #endif
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -353,8 +355,32 @@ static double impulse_latency_ms(uint32_t target, uint32_t block) {
     return found < 0 ? -1 : 1000.0 * (double)(found - impulse_at) / 48000;
 }
 
-/* Two real threads, wall-clock paced, for TSan and scheduling realism. */
+/* Two real threads, wall-clock paced. On Darwin use an audio-like scheduling
+ * contract, not coalesced ordinary timer threads; retain the same underrun
+ * threshold and report scheduling failures/jitter rather than hiding them. */
 static nv_bridge *tb; static atomic_int tstop;
+static int inject_thread_stall;
+typedef struct { double max_late_ms, max_work_ms; unsigned callbacks; int policy_rc; } timing;
+static timing producer_timing, consumer_timing;
+static int audio_test_policy(double period_ms) {
+#ifdef __APPLE__
+    mach_timebase_info_data_t base;
+    if (mach_timebase_info(&base) != KERN_SUCCESS) return -1;
+    double ticks_ms = 1e6 * base.denom / base.numer;
+    thread_time_constraint_policy_data_t policy = {
+        (uint32_t)(period_ms * ticks_ms), (uint32_t)(1.0 * ticks_ms),
+        (uint32_t)(5.0 * ticks_ms), TRUE
+    };
+    thread_port_t thread = mach_thread_self();
+    kern_return_t rc = thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY,
+        (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    mach_port_deallocate(mach_task_self(), thread);
+    return (int)rc;
+#else
+    (void)period_ms;
+    return 0;
+#endif
+}
 static void sleep_until(double ms) {
 #ifdef __APPLE__ /* absolute Mach wait avoids relative nanosleep coalescing */
     double d = ms - ms_now();
@@ -362,25 +388,38 @@ static void sleep_until(double ms) {
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
     uint64_t deadline = mach_absolute_time() + (uint64_t)(d * 1e6 * tb.denom / tb.numer);
-    mach_wait_until(deadline);
+    while (mach_wait_until(deadline) == KERN_ABORTED) { /* same deadline */ }
 #else
     struct timespec ts; ts.tv_sec = (time_t)(ms / 1e3); ts.tv_nsec = (long)(fmod(ms, 1e3) * 1e6);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
 #endif
 }
 static void *tprod(void *a) {
-    (void)a; float buf[480]; double t0 = ms_now(), period = 480.0 / (48000 * (1 + 300e-6)) * 1e3; long k = 0; unsigned s = 5;
+    (void)a; float buf[480]; double period = 480.0 / (48000 * (1 + 300e-6)) * 1e3; long k = 0; unsigned s = 5;
+    timing *t = &producer_timing;
+    t->policy_rc = audio_test_policy(period);
+    double t0 = ms_now();
     while (!atomic_load(&tstop)) {
+        double start = ms_now();
+        t->max_late_ms = fmax(t->max_late_ms, start - (t0 + k * period));
         for (int i = 0; i < 480; i++) buf[i] = (float)(0.1 * lcg_noise(&s));
         nv_bridge_push(tb, buf, 480, (uint64_t)(ms_now() * 1e6)); k++;
+        t->max_work_ms = fmax(t->max_work_ms, ms_now() - start); t->callbacks++;
+        if (inject_thread_stall && k % 60 == 0) sleep_until(ms_now() + 150);
         sleep_until(t0 + k * period);
     }
     return NULL;
 }
 static void *tcons(void *a) {
-    (void)a; float buf[512 * 2]; double t0 = ms_now(), period = 512.0 / 48000 * 1e3; long k = 0;
+    (void)a; float buf[512 * 2]; double period = 512.0 / 48000 * 1e3; long k = 0;
+    timing *t = &consumer_timing;
+    t->policy_rc = audio_test_policy(period);
+    double t0 = ms_now();
     while (!atomic_load(&tstop)) {
+        double start = ms_now();
+        t->max_late_ms = fmax(t->max_late_ms, start - (t0 + k * period));
         nv_bridge_pull(tb, buf, 512, (uint64_t)(ms_now() * 1e6)); k++;
+        t->max_work_ms = fmax(t->max_work_ms, ms_now() - start); t->callbacks++;
         sleep_until(t0 + k * period);
     }
     return NULL;
@@ -388,17 +427,39 @@ static void *tcons(void *a) {
 static void test_bridge_threads(unsigned long long *underruns, unsigned long long *overflows) {
     nv_bridge_config cfg = {48000, 1, 48000, 2, 512, 2400, 1.f, 2000};
     tb = nv_bridge_create(&cfg);
+    CHECK(tb != NULL, "threaded bridge allocation");
+    if (!tb) return;
     pthread_t p, c;
-    pthread_create(&p, NULL, tprod, NULL); pthread_create(&c, NULL, tcons, NULL);
+    int prc = pthread_create(&p, NULL, tprod, NULL);
+    int crc = pthread_create(&c, NULL, tcons, NULL);
+    CHECK(prc == 0 && crc == 0, "thread creation: %d %d", prc, crc);
     for (int i = 0; i < 6; i++) { nv_bridge_set_strength(tb, i % 2 ? 0.5f : 1.f); sleep_until(ms_now() + 500); }
     atomic_store(&tstop, 1);
-    pthread_join(p, NULL); pthread_join(c, NULL);
+    if (!prc) pthread_join(p, NULL);
+    if (!crc) pthread_join(c, NULL);
+    CHECK(producer_timing.policy_rc == 0 && consumer_timing.policy_rc == 0,
+        "thread timing policy rejected: %d %d", producer_timing.policy_rc, consumer_timing.policy_rc);
+    CHECK(producer_timing.callbacks >= 200 && consumer_timing.callbacks >= 200, "threaded callback progress");
+    fprintf(stderr, "thread_timing producer_policy=%d consumer_policy=%d producer_late_ms=%.3f consumer_late_ms=%.3f producer_work_ms=%.3f consumer_work_ms=%.3f producer_callbacks=%u consumer_callbacks=%u stall_mutation=%d\n",
+        producer_timing.policy_rc, consumer_timing.policy_rc, producer_timing.max_late_ms,
+        consumer_timing.max_late_ms, producer_timing.max_work_ms, consumer_timing.max_work_ms,
+        producer_timing.callbacks, consumer_timing.callbacks, inject_thread_stall);
     nv_bridge_stats st; nv_bridge_get_stats(tb, &st);
     *underruns = st.underruns; *overflows = st.overflows;
     nv_bridge_destroy(tb);
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--threads-only") == 0) {
+        inject_thread_stall = argc > 2 && strcmp(argv[2], "--stall-producer") == 0;
+        unsigned long long tu = 0, to = 0;
+        test_bridge_threads(&tu, &to);
+        CHECK(to == 0, "threaded overflows %llu", to);
+        CHECK(tu <= 1, "threaded underruns %llu", tu);
+        printf("{\"ok\":%s,\"failures\":%d,\"threaded_underruns\":%llu,\"threaded_overflows\":%llu,\"stall_mutation\":%s}\n",
+            failures ? "false" : "true", failures, tu, to, inject_thread_stall ? "true" : "false");
+        return failures ? 1 : 0;
+    }
     int denoise_only = argc > 1 && strcmp(argv[1], "--denoise-only") == 0;
     int mute_output = argc > 2 && strcmp(argv[2], "--mute-denoise-output") == 0;
     test_endpoint_watch(); test_denoise_signal(mute_output);
