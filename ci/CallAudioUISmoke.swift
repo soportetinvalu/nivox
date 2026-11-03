@@ -10,7 +10,11 @@ import Vision
 // viewport captures let a paragraph cross the scroll boundary without skipping
 // its middle/end. OCR errors fail closed and preserve pixels + recognized text.
 func normalizedWords(_ text: String) -> [String] {
-    text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_ES"))
+    // Vision emitted Cyrillic small u (visually Latin y) in Spanish conjunctions
+    // in run 41711879569/2. Only this observed glyph equivalence is folded;
+    // no edit distance, missing-word forgiveness or expected-copy substitution.
+    text.replacingOccurrences(of: "у", with: "y")
+        .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_ES"))
         .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
 }
 func missingTextSpans(_ expected: [String], in recognized: [String]) -> [String] {
@@ -122,13 +126,25 @@ import NivoxCallAudio
         guard let image = context.makeImage() else { fatalError("cannot encode OCR sampling context") }
         return image
     }
-    @MainActor static func recognizedText(_ image: CGImage) throws -> String {
+    @MainActor static func recognizedText(_ image: CGImage, correction: Bool = false) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["es-ES", "en-US"]
-        request.usesLanguageCorrection = false
+        request.usesLanguageCorrection = correction
         try VNImageRequestHandler(cgImage: image).perform([request])
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+    // Independent reads of the SAME pixels, without customWords or expected
+    // paragraphs supplied to Vision. Each span must occur in a complete read;
+    // never splice tokens from different reads to reconstruct a missing span.
+    @MainActor static func recognizedVariants(_ native: CGImage, sampled: CGImage) throws -> [[String: Any]] {
+        var reads: [[String: Any]] = []
+        for (image, scale, correction) in [(sampled, 2, false), (native, 1, false), (sampled, 2, true)] {
+            reads.append(["scale": scale, "language_correction": correction,
+                          "languages": ["es-ES", "en-US"],
+                          "recognized": try recognizedText(image, correction: correction)])
+        }
+        return reads
     }
     // NSBitmapImageRep decodes bytes; it has no contentsOf: URL initializer.
     @MainActor static func snapshotFixture(_ fixture: URL) -> CGImage? {
@@ -149,8 +165,9 @@ import NivoxCallAudio
         let image = opaqueSnapshot(raw, background: .white) // Fixture was captured in light appearance.
         let nativeText = try recognizedText(image)
         let sampled = ocrSnapshot(image)
-        let text = try recognizedText(sampled)
-        let missing = missingTextSpans(expected, in: [text])
+        let reads = try recognizedVariants(image, sampled: sampled)
+        let text = reads[0]["recognized"] as! String
+        let missing = missingTextSpans(expected, in: reads.map { $0["recognized"] as! String })
         let rawMissing = missingTextSpans(expected, in: [rawText])
         let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!
         do {
@@ -158,7 +175,7 @@ import NivoxCallAudio
             try NSBitmapImageRep(cgImage: sampled).representation(using: .png, properties: [:])!
                 .write(to: out.appendingPathComponent("snapshot-regression-ocr.png"))
             let record: [String: Any] = ["recognized": text, "raw_recognized": rawText,
-                "native_recognized": nativeText,
+                "native_recognized": nativeText, "ocr_reads": reads,
                 "native_missing_spans": missingTextSpans(expected, in: [nativeText]),
                 "ocr_scale": 2, "ocr_border_pixels": 24,
                 "missing_spans": missing, "raw_missing_spans": rawMissing]
@@ -222,6 +239,7 @@ import NivoxCallAudio
         window.title = "Nivox production call view · CI"
         let name = "\(tabbed ? "tabbed" : "call")-\(width)x\(height)"
         var record: [String: Any] = ["viewport_width": width, "viewport_height": height,
+            "minimum_height_contract": tabbed ? 592 : 560,
             "tabbed_production_root": tabbed, "ok": false]
         var failures: [String] = []
         var stages = [layoutMeasures(window, host: host, stage: "created")]
@@ -247,7 +265,18 @@ import NivoxCallAudio
         NSApp.activate(ignoringOtherApps: true)
         try? await Task.sleep(nanoseconds: 700_000_000)
         host.layoutSubtreeIfNeeded()
+        stages.append(layoutMeasures(window, host: host, stage: "native_chrome_settled"))
+        // TabView installs native window chrome during attachment, changing
+        // contentRect even without a layout defect. Resize the actual parent
+        // window AFTER that installation; never force a child frame or relabel
+        // an expanded viewport. Keep the before/after geometry as evidence.
+        window.setContentSize(NSSize(width: CGFloat(width), height: CGFloat(height)))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        host.layoutSubtreeIfNeeded()
         stages.append(layoutMeasures(window, host: host, stage: "settled"))
+        let fitsScreen = window.screen.map { $0.visibleFrame.insetBy(dx: -1, dy: -1).contains(window.frame) } ?? false
+        record["window_fits_visible_screen"] = fitsScreen
+        if !fitsScreen { failures.append("window frame does not fit actual visible screen: \(window.frame)") }
         let viewportOK = abs(host.bounds.width - CGFloat(width)) < 1 && abs(host.bounds.height - CGFloat(height)) < 1
         record["viewport_preserved"] = viewportOK
         if !viewportOK {
@@ -338,9 +367,10 @@ import NivoxCallAudio
                              "scroll_y": y,
                              "pixel_width": bitmap.pixelsWide, "pixel_height": bitmap.pixelsHigh])
             checkpoint() // Preserve paths/pixels even when Vision throws.
-            let recognized = try recognizedText(ocrImage)
-            pages.append(recognized)
-            captures[captures.count - 1]["recognized"] = recognized
+            let reads = try recognizedVariants(image, sampled: ocrImage)
+            pages.append(contentsOf: reads.map { $0["recognized"] as! String })
+            captures[captures.count - 1]["recognized"] = reads[0]["recognized"]
+            captures[captures.count - 1]["ocr_reads"] = reads
           } catch {
             failures.append("capture \(index) failed: \(error)")
           }
@@ -351,6 +381,8 @@ import NivoxCallAudio
         if !model.driver { expected.append(CallAudioCopy.missingDriver) }
         let missing = missingTextSpans(expected, in: pages)
         record["missing_spans"] = missing
+        record["sampled_uncorrected_missing_spans"] = missingTextSpans(expected, in: captures.compactMap { $0["recognized"] as? String })
+        record["ocr_policy"] = "exact three-word spans per read; 2x raw, 1x raw, 2x Vision language correction; case/accents and observed Cyrillic y folded; no edit distance or customWords"
         record["expected_paragraphs"] = expected
         if !missing.isEmpty {
             failures.append("significant text not visible in \(name): \(missing.joined(separator: " | "))")
@@ -371,6 +403,14 @@ import NivoxCallAudio
                 "text oracle accepted a truncated suffix")
         require(!missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos cuatro cinco"]).isEmpty,
                 "text oracle accepted missing middle words")
+        require(missingTextSpans(["entrada y salida"], in: ["entrada у salida"]).isEmpty,
+                "text oracle rejected observed Cyrillic y homoglyph")
+        require(!missingTextSpans(["entrada y salida"], in: ["entrada salida"]).isEmpty,
+                "text oracle accepted missing conjunction")
+        require(!missingTextSpans(["salida se mezcla a mono"], in: ["salida se mezcia a mono"]).isEmpty,
+                "text oracle must not forgive arbitrary OCR edits")
+        require(!missingTextSpans(["Uno dos tres"], in: ["Uno dos", "tres"]).isEmpty,
+                "text oracle spliced unrelated reads")
         require(missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos tres cuatro", "dos tres cuatro cinco"]).isEmpty,
                 "text oracle rejected overlapping scroll captures")
         require(args.count == 3, "usage: ui-smoke OUTPUT_DIRECTORY absent|present")
@@ -412,10 +452,12 @@ import NivoxCallAudio
             regressionPassed = true
         } catch { failures.append("snapshot incident regression failed: \(error)") }
         var textChecks: [[String: Any]] = []
-        // Full Cartesian matrix: both roots, both widths, both heights.
+        // Both roots and widths, at their honest minimum and 620pt. 900pt
+        // cannot fit the runner's 1024x677 visible screen. TabView's effective
+        // minimum is 592 (560 + native chrome), not a simulated 560pt child.
         for width in [780, 1000] {
-            for height in [560, 900] {
-                for tabbed in [false, true] {
+            for tabbed in [false, true] {
+                for height in [tabbed ? 592 : 560, 620] {
                     textChecks.append(await render(model, out: out, width: width, height: height, tabbed: tabbed))
                     let progress: [String: Any] = ["ok": false, "phase": args[2],
                         "matrix_expected": 8, "matrix_completed": textChecks.count,

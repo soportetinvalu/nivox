@@ -17,8 +17,9 @@ def synthetic_runtime():
             'opaque_capture_selftests_passed': True, 'original_capture_regression_passed': True,
             'text_visibility_checks': [
                 {'viewport_width': w, 'viewport_height': h, 'tabbed_production_root': tab,
-                 'ok': True, 'viewport_preserved': True, 'failures': []}
-                for w in [780, 1000] for h in [560, 900] for tab in [False, True]]}
+                 'ok': True, 'viewport_preserved': True, 'window_fits_visible_screen': True, 'failures': []}
+                for w in [780, 1000] for tab in [False, True]
+                for h in ([592, 620] if tab else [560, 620])]}
 
 
 class DiagnosticOrchestrationTests(unittest.TestCase):
@@ -35,6 +36,8 @@ class DiagnosticOrchestrationTests(unittest.TestCase):
             if defect == 'incomplete':
                 runtime['text_visibility_checks'].pop()
                 runtime['matrix_completed'] = 7
+            if defect == 'screen':
+                runtime['text_visibility_checks'][0]['window_fits_visible_screen'] = False
 
             def run(command, expect=True):
                 self.assertFalse(expect)
@@ -54,7 +57,14 @@ class DiagnosticOrchestrationTests(unittest.TestCase):
                     json.dumps({'ok': False, 'missing_spans': ['uno dos tres'],
                                 'viewport_preserved': defect != 'mutant-viewport', 'visible_scroll_count': 1,
                                 'failures': ['significant text not visible in call-780x560: uno dos tres']}))
-                (destination / 'runtime.json').write_text(json.dumps(synthetic_runtime()))
+                mutant_runtime = synthetic_runtime()
+                mutant_runtime['ok'] = False
+                for c in mutant_runtime['text_visibility_checks']:
+                    c.update(ok=False, missing_spans=['uno dos tres'], visible_scroll_count=1,
+                             failures=['significant text not visible: uno dos tres'])
+                if defect == 'mutant-tabbed':
+                    mutant_runtime['text_visibility_checks'][2]['failures'] = ['capture failed']
+                (destination / 'runtime.json').write_text(json.dumps(mutant_runtime))
                 message = 'compiler failure' if defect == 'truncation' else 'significant text not visible'
                 return subprocess.CompletedProcess(command, 1, '', message)
 
@@ -118,6 +128,21 @@ class DiagnosticOrchestrationTests(unittest.TestCase):
     def test_matrix_count_must_agree(self):
         runtime = synthetic_runtime()
         runtime['matrix_completed'] = 7
+        with self.assertRaises(AssertionError):
+            verify_matrix(runtime)
+
+
+    def test_offscreen_window_cannot_pass(self):
+        self.assertFalse(self.scenario('screen')['ok'])
+
+    def test_tabbed_mutant_unrelated_failure_cannot_certify_oracle(self):
+        report = self.scenario('mutant-tabbed')
+        self.assertFalse(report['ok'])
+        self.assertNotIn('real_truncation_rejected', report)
+
+    def test_old_impossible_dimensions_cannot_pass(self):
+        runtime = synthetic_runtime()
+        runtime['text_visibility_checks'][2]['viewport_height'] = 560
         with self.assertRaises(AssertionError):
             verify_matrix(runtime)
 

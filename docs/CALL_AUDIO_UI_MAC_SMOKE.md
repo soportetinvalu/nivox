@@ -23,26 +23,71 @@ no a su hijo: la barra de pestañas no consume parte de una altura fija del hijo
 No se encogen fuentes ni se eliminan advertencias para conseguir un verde.
 
 La prueba aloja la vista de llamadas real **y `NivoxContent`, el contenedor de
-pestañas usado por `NivoxApp`**, en el producto cartesiano de anchos 780/1000 y
-alturas 560/900 puntos: ocho casos por fase HAL, tanto en candidato como en mutante.
-La ventana no puede crecer
+pestañas usado por `NivoxApp`**, con anchos 780/1000, alturas 560/620 para la
+vista directa y **592/620 para el contenedor con pestañas**: ocho casos por fase
+HAL, tanto en candidato como en mutante. 592 es el mínimo efectivo observado
+en la VM; no se presenta un hijo de 560 como una ventana con pestañas de 560.
+900 no cabe en el área visible de 1024×677 del runner. Tras instalarse el chrome
+nativo de `TabView`, se redimensiona la ventana padre con `setContentSize`, sin
+imponer dimensiones al hijo. Se guardan medidas antes y después; el tamaño
+efectivo debe coincidir con el solicitado y la ventana completa debe caber en
+la pantalla visible real. La ventana no puede crecer
 silenciosamente para acomodar el texto. Se recorren posiciones solapadas del
 `NSScrollView` real y se guardan capturas del viewport, no del documento oculto.
 
 Vision OCR reconoce los píxeles de cada captura. Se exige que aparezca cada tramo
 consecutivo de tres palabras de **todo** el contenido de routing, cierre/permiso,
 pérdida de audio, pie de seguridad, estado actual y (si procede) instalación.
-Solo se normalizan mayúsculas, acentos y puntuación; no se toleran palabras
+Se normalizan mayúsculas, acentos, puntuación y el único homoglifo observado
+`у` cirílico → `y` latino (run 41711879569, intento 2). No hay distancia de edición
+ni sustitución por el texto esperado; no se toleran palabras
 omitidas ni se aceptan etiquetas de accesibilidad como prueba de visibilidad.
 Las capturas solapadas permiten verificar párrafos partidos entre viewports.
 Un error OCR falla de forma cerrada y conserva el texto reconocido para diagnóstico;
 no equivale automáticamente a un defecto de la aplicación.
 
+Cada captura opaca se lee con Vision a 2× sin corrección lingüística, a 1× sin
+corrección y a 2× con la corrección propia de Vision. No se suministra `customWords`
+ni ningún aviso esperado al reconocedor. Un tramo completo tiene que aparecer
+en una lectura; no se ensamblan palabras de lecturas distintas. Se conservan
+los tres textos sin modificar, sus ajustes, los PNG exactos crudo/opaco/2×,
+sus hashes, el texto esperado y los tramos ausentes antes y después de las
+lecturas alternativas. Así se puede distinguir una errata OCR de una omisión
+real sin aceptar coincidencias difusas. Si las tres lecturas no bastan, falla.
+
 La contraprueba recompila una **copia desechable** de `CallAudio.swift` que cambia
 los avisos de tamaño intrínseco a `.lineLimit(1)`. Ejecuta el mismo renderizador y
 oráculo: debe fallar específicamente con `significant text not visible` y guardar
 tramos ausentes. Un fallo de compilación, HAL, OCR o viewport no cuenta como una
-contraprueba válida. El candidato de producción nunca usa esa copia.
+contraprueba válida. Se exige rechazo por texto ausente, sin errores de captura,
+HAL ni viewport, en **los ocho casos**, incluidas ambas alturas con pestañas.
+La regresión del PNG original debe aprobar también en el mutante. El candidato
+de producción nunca usa esa copia. Hasta ejecutar esta contraprueba nativa no
+se considera demostrada la fiabilidad del OCR alternativo.
+
+## Diagnóstico E2E sin convertir fallos en aprobados
+
+`callaudio/tools/classify_e2e.py` conserva el RC, JSON y stderr originales, las
+siete capturas F32 sin filtrar, callbacks CSV y metadatos con SHA-256. Añade
+`e2e-diagnosis.json`: un E2E fallido con saltos de timestamps y mensajes de
+sobrecarga CoreAudio se clasifica `failed_with_host_overload_evidence`, pero
+**sigue devolviendo RC1 y `ok: false`**. Es evidencia de sobrecarga concurrente,
+no prueba de que sea la causa única ni de que el producto esté bien. Sin ambas
+señales se etiqueta `failed_without_confirmed_host_overload`; evidencia incompleta
+tampoco aprueba. No cambia umbrales, elimina glitches ni reintenta hasta pasar.
+
+En la evidencia genuina de run 41711879569/intento 2, el clasificador mantiene
+los tres fallos originales. Las capturas 01 y 03 contienen discontinuidades
+de generación y captura, junto con mensajes de sobrecarga del host. No se
+modifica la prueba C ni su veredicto. La clasificación corre tras recoger logs
+con `always()`; el paso E2E original sigue fallando y los artefactos se conservan.
+
+Validación local de esta revisión: 13 pruebas de orquestación y 7 del clasificador,
+instalador, compatibilidad, recuperación CLI y controlador C release/ASan+UBSan
+con contrapruebas aprobados. Linux rechaza correctamente el arnés nativo; no se
+afirma compilación Swift, render ni OCR nativos a partir de estas comprobaciones.
+Los incidentes siguientes describen revisiones anteriores y sus contratos de
+viewport históricos; la matriz vigente es la indicada arriba.
 
 ## Incidente de captura del run 41701415863
 

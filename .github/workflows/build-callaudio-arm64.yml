@@ -26,6 +26,8 @@ jobs:
         run: python3 callaudio/tests/test_cli_recovery.py
       - name: UI diagnostic orchestration regression (not native rendering)
         run: python3 tests/test_call_ui_diagnostics.py
+      - name: E2E diagnostic classification regression (failures stay failures)
+        run: python3 callaudio/tests/test_e2e_classification.py
       - name: Call controller lifecycle (release, ASan+UBSan, readiness counterprobe)
         run: python3 tests/test_call_audio.py --out build/call-ui-control
       - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)
@@ -106,7 +108,8 @@ jobs:
           done
           [[ "$found" == "1" ]] || { echo 'driver not loaded by coreaudiod'; cat "$out/devices.json" || true; exit 1; }
           mkdir "$out/e2e-captures"
-          rc=0; NV_E2E_DIAGNOSTICS="$out/e2e-captures" "$out/nv-e2e" > "$out/e2e.json" || rc=$?
+          rc=0; NV_E2E_DIAGNOSTICS="$out/e2e-captures" "$out/nv-e2e" > "$out/e2e.json" 2> "$out/e2e.stderr" || rc=$?
+          printf '%s\n' "$rc" > "$out/e2e.exitcode"
           cat "$out/e2e.json"
           [[ "$rc" == "0" ]] || { echo "nv-e2e failed ($rc)"; exit 1; }
           rc=0; "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 4 2> "$out/cli-smoke.jsonl" || rc=$?
@@ -153,6 +156,9 @@ jobs:
         run: |
           log show --last 5m --style compact --predicate 'process == "coreaudiod" OR process CONTAINS "Core-Audio-Driver-Service"' > build/callaudio-mac/coreaudio.log 2>&1 || true
           tail -n 80 build/callaudio-mac/coreaudio.log || true
+      - name: Classify E2E diagnostics without waiving the failed audio assertions
+        if: ${{ always() && steps.mac_build.outcome == 'success' }}
+        run: python3 callaudio/tools/classify_e2e.py build/callaudio-mac --report build/callaudio-mac/e2e-diagnosis.json
       - name: Retain ad hoc build and evidence (not a Release)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -171,6 +177,9 @@ jobs:
             build/callaudio-mac/test_core
             build/callaudio-mac/devices.json
             build/callaudio-mac/e2e.json
+            build/callaudio-mac/e2e.stderr
+            build/callaudio-mac/e2e.exitcode
+            build/callaudio-mac/e2e-diagnosis.json
             build/callaudio-mac/e2e-captures/
             build/callaudio-mac/cli-smoke.jsonl
             build/callaudio-mac/cli-recovery.jsonl

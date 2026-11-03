@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def verify_matrix(runtime):
-    expected = {(w, h, tab) for w in [780, 1000] for h in [560, 900] for tab in [False, True]}
+    expected = {(w, h, tab) for w in [780, 1000] for tab in [False, True]
+                for h in ([592, 620] if tab else [560, 620])}
     checks = runtime['text_visibility_checks']
     actual = [(c['viewport_width'], c['viewport_height'], c['tabbed_production_root']) for c in checks]
     assert len(actual) == len(expected) and set(actual) == expected, actual
@@ -36,7 +37,7 @@ def collect_diagnostics(run, binary, out, driver, compile_mutant, report):
         verify_matrix(runtime)
         assert proc.returncode == 0 and runtime['ok'] and runtime['phase'] == driver, (
             f'production matrix failed: rc={proc.returncode}, ok={runtime["ok"]}, phase={runtime["phase"]}')
-        assert all(c['ok'] and c['viewport_preserved'] and not c['failures']
+        assert all(c['ok'] and c['viewport_preserved'] and c['window_fits_visible_screen'] and not c['failures']
                    for c in runtime['text_visibility_checks'])
         assert runtime['opaque_capture_selftests_passed'] and runtime['original_capture_regression_passed']
 
@@ -59,7 +60,15 @@ def collect_diagnostics(run, binary, out, driver, compile_mutant, report):
         assert failure['viewport_preserved'] and failure['visible_scroll_count'] == 1
         assert failure['failures'] and all(f.startswith('significant text not visible')
                                            for f in failure['failures']), failure['failures']
-        verify_matrix(json.loads((truncated / 'runtime.json').read_text()))
+        runtime = json.loads((truncated / 'runtime.json').read_text())
+        verify_matrix(runtime)
+        assert not runtime['ok'] and runtime['original_capture_regression_passed']
+        # Both production roots at every size must reject REAL truncation only.
+        # An unrelated failure or wrong geometry cannot certify the new OCR reads.
+        assert all(not c['ok'] and c['missing_spans'] and c['viewport_preserved']
+                   and c['window_fits_visible_screen'] and c['visible_scroll_count'] == 1
+                   and c['failures'] and all(f.startswith('significant text not visible') for f in c['failures'])
+                   for c in runtime['text_visibility_checks'])
         report['real_truncation_rejected'] = True
 
     attempt('production_matrix', positive)
