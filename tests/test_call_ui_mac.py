@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Render production SwiftUI with real HAL; never grants TCC or opens audio."""
+"""OCR production SwiftUI with real HAL; does not request/change TCC or open audio."""
 import argparse
 import hashlib
 import json
@@ -28,7 +28,7 @@ def main():
     if not all(p.is_file() for p in libs):
         raise SystemExit('BLOQUEADO: complete production Mac app build required')
     out.mkdir(parents=True)
-    report = {'ok': False, 'scope': 'production model/view hosted in test process + real HAL; not packaged app launch or click automation',
+    report = {'ok': False, 'scope': 'production call view and tabbed root hosted in test process + real HAL + pixel OCR; not packaged app launch or click automation',
               'driver': args.driver, 'commands': [], 'input_hashes': {}}
     for name in ['App/NoiseProbeApp.swift', 'App/CallAudio.swift', 'ci/CallAudioUISmoke.swift', 'tests/test_call_ui_mac.py']:
         report['input_hashes'][name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
@@ -51,14 +51,17 @@ def main():
         try:
             sdk = run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).stdout.strip()
             binary = out / 'ui-smoke'
-            run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '-Onone',
+            def compile_view(view_source, executable):
+                run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '-Onone',
                  '-target', 'arm64-apple-macos13.0', '-sdk', sdk, '-I', ROOT / 'CNoise/include',
-                 '-I', ROOT / 'callaudio/control', generated, ROOT / 'App/CallAudio.swift',
+                 '-I', ROOT / 'callaudio/control', generated, view_source,
                  ROOT / 'ci/CallAudioUISmoke.swift', *libs,
                  '-framework', 'CoreAudio', '-framework', 'AudioToolbox', '-framework', 'CoreFoundation',
-                 '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation', '-o', binary])
+                 '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation',
+                 '-framework', 'Vision', '-o', executable])
+                run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--entitlements', ROOT / 'App/Entitlements.plist', executable])
             # Keep production hardened runtime/audio-input entitlement. No TCC overrides.
-            run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--entitlements', ROOT / 'App/Entitlements.plist', binary])
+            compile_view(ROOT / 'App/CallAudio.swift', binary)
             run([binary, out, args.driver])
             runtime = json.loads((out / 'runtime.json').read_text())
             assert runtime['ok'] and runtime['phase'] == args.driver
@@ -68,8 +71,25 @@ def main():
             proc = run([binary, negative, 'present' if args.driver == 'absent' else 'absent'], expect=False)
             assert proc.returncode == 1 and 'real HAL driver presence disagrees with phase' in proc.stderr, proc.stderr
             assert not (negative / 'runtime.json').exists()
-            report.update(ok=True, opposite_driver_phase_rejected=True, runtime=runtime,
-                          png_sha256=hashlib.sha256((out / 'production-call-view.png').read_bytes()).hexdigest())
+            report.update(opposite_driver_phase_rejected=True, runtime=runtime)
+            # Real layout regression, not mocked OCR: rebuild a disposable copy
+            # forcing the notices to a single truncated line. Same renderer/oracle.
+            mutant_source = out / 'CallAudio-truncated.swift'
+            view_source = (ROOT / 'App/CallAudio.swift').read_text()
+            marker = '.fixedSize(horizontal: false, vertical: true)'
+            assert view_source.count(marker) >= 7
+            mutant_source.write_text(view_source.replace(marker, '.lineLimit(1)'))
+            mutant_binary = out / 'ui-smoke-truncated'
+            compile_view(mutant_source, mutant_binary)
+            truncated = out / 'truncation-counterprobe'
+            truncated.mkdir()
+            proc = run([mutant_binary, truncated, args.driver], expect=False)
+            assert proc.returncode == 1 and 'significant text not visible' in proc.stderr, proc.stderr
+            failure = json.loads((truncated / 'call-780x560-text.json').read_text())
+            assert not failure['ok'] and failure['missing_spans']
+            report.update(ok=True, real_truncation_rejected=True,
+                          png_sha256={str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                      for p in sorted(out.rglob('*.png'))})
         finally:
             (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report))

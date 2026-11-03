@@ -267,9 +267,18 @@ struct CallMenuView: View {
     }
 }
 
+// Shared with the screenshot oracle; the oracle reads pixels, not accessibility labels.
+enum CallAudioCopy {
+    static let routing = "En Zoom, Meet o Teams selecciona «Nivox Microphone» como entrada y «Nivox Speaker» como salida. Nivox no cambia los dispositivos predeterminados del sistema ni la configuración de esas apps."
+    static let lifecycle = "Cerrar la ventana o cambiar de pestaña no interrumpe una llamada activa. Nivox sigue en la barra de menús: puedes reabrir esta ventana o detener el audio explícitamente. Una solicitud de permiso pendiente se cancela al cerrar la ventana."
+    static let safety = "Usa auriculares y baja el volumen antes de activar. Sin cancelación de eco (AEC). La salida se mezcla a mono antes de duplicarse en estéreo. Actividad del motor no confirma que tu app de llamadas esté usando Nivox. Pendiente de validación en una Mac real."
+    static let missingDriver = "Driver Nivox no disponible: instala NivoxAudio.driver con el instalador y actualiza. Requiere administrador; esta app no instala nada."
+}
+
 struct CallAudioView: View {
     @ObservedObject var audio: CallAudioModel
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Audio para llamadas").font(.title2.bold())
             Text("Procesamiento local continuo · SpeexDSP 1.2.1 · sin red ni grabación")
@@ -293,25 +302,33 @@ struct CallAudioView: View {
                     Button("Actualizar dispositivos") { audio.refresh() }
                 }.padding(8).disabled(audio.enabled || audio.busy)
             }
-            Text(audio.driver ? "Driver Nivox detectado" : "Driver Nivox no disponible: instala NivoxAudio.driver con el instalador y actualiza. Requiere administrador; esta app no instala nada.")
+            Text(audio.driver ? "Driver Nivox detectado" : CallAudioCopy.missingDriver)
                 .foregroundColor(audio.driver ? .secondary : .orange)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Iniciar audio de llamadas") { audio.start() }.disabled(!audio.canStart)
                 Button("Detener audio…") { audio.requestStop() }.disabled(!audio.enabled && !audio.busy)
             }
             Text(audio.status).font(.headline).accessibilityIdentifier("call-audio-status")
-            if !audio.detail.isEmpty { Text(audio.detail).foregroundColor(.orange).textSelection(.enabled) }
+                .fixedSize(horizontal: false, vertical: true)
+            if !audio.detail.isEmpty {
+                Text(audio.detail).foregroundColor(.orange).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if audio.gaps > 0 {
                 Text("Aviso: \(audio.gaps) cortes o desbordamientos acumulados en el motor. Si persisten, apaga y revisa los dispositivos.")
                     .foregroundColor(.orange)
             }
             Button("Abrir permiso de Micrófono…") { audio.openPrivacy() }
             Divider()
-            Text("En Zoom, Meet o Teams selecciona «Nivox Microphone» como entrada y «Nivox Speaker» como salida. Nivox no cambia los dispositivos predeterminados del sistema ni la configuración de esas apps.")
-            Text("Cerrar la ventana o cambiar de pestaña no interrumpe una llamada activa. Nivox sigue en la barra de menús: puedes reabrir esta ventana o detener el audio explícitamente. Una solicitud de permiso pendiente se cancela al cerrar la ventana.")
+            Text(CallAudioCopy.routing).fixedSize(horizontal: false, vertical: true)
+            Text(CallAudioCopy.lifecycle).fixedSize(horizontal: false, vertical: true)
             Text(CallAudioModel.routingWarning).foregroundColor(.orange)
-            Text("Usa auriculares y baja el volumen antes de activar. Sin cancelación de eco (AEC). La salida se mezcla a mono antes de duplicarse en estéreo. Actividad del motor no confirma que tu app de llamadas esté usando Nivox. Pendiente de validación en una Mac real.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text(CallAudioCopy.safety)
                 .font(.footnote).foregroundColor(.secondary)
-        }.padding(24).frame(minWidth: 780, minHeight: 560)
+                .fixedSize(horizontal: false, vertical: true)
+        }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(minWidth: 780)
     }
 }

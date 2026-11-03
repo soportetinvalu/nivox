@@ -268,7 +268,7 @@ enum ProbeError: LocalizedError {
     }
 }
 
-private struct NivoxContent: View {
+struct NivoxContent: View {
     @ObservedObject var probe: AudioProbe
     @ObservedObject var calls: CallAudioModel
     @State private var tab = 0
@@ -277,6 +277,7 @@ private struct NivoxContent: View {
             CallAudioView(audio: calls).tabItem { Text("Llamadas") }.tag(0)
             probeView.disabled(calls.busy || calls.enabled).tabItem { Text("Prueba A/B") }.tag(1)
         }
+        .frame(minWidth: 780, minHeight: 560)
         .onChange(of: tab) { _ in
             calls.handleLifecycle(NV_CALL_UI_TAB_CHANGED)
             probe.stop(discard: true, reason: "Cambio de pestaña: prueba detenida.")

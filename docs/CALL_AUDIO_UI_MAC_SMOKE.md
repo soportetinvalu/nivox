@@ -2,8 +2,8 @@
 
 ## Ejecución
 
-El workflow manual `build-callaudio-arm64.yml` ejecuta, tras compilar las
-bibliotecas reales de producción:
+El workflow manual `build-callaudio-arm64.yml` compila la aplicación y las
+bibliotecas reales y ejecuta:
 
 ```sh
 python3 tests/test_call_ui_mac.py --build build/callaudio-mac --out build/ui-mac-absent --driver absent
@@ -11,58 +11,77 @@ python3 tests/test_call_ui_mac.py --build build/callaudio-mac --out build/ui-mac
 python3 tests/test_call_ui_mac.py --build build/callaudio-mac --out build/ui-mac-present --driver present
 ```
 
-Se exige Darwin arm64, un directorio de salida nuevo y las bibliotecas estáticas
-del build de la aplicación. Linux se rechaza explícitamente; no hay sustituto
-simulado. El proceso tiene un timeout de 120 segundos por comando.
+Se exige Darwin arm64, un directorio nuevo y las bibliotecas del build real.
+Linux se rechaza; no hay sustituto simulado. Cada comando tiene timeout de 120 s.
 
-## Qué acredita una ejecución verde
+## Corrección de diseño y regresión visual
 
-- Se compilan todos los cuerpos Swift de producción. La única transformación
-  es quitar `@main` de `NivoxApp` en una copia bajo `build/`, para usar la entrada
-  del arnés. No se modifica código de producción ni se inyecta backend/permiso.
-- Se instancia `CallAudioModel`, que usa `nv_call_create_mac` y su cola real.
-  Su inventario debe coincidir con una enumeración independiente del HAL real,
-  filtrada con las mismas propiedades físicas documentadas.
+Los avisos de routing, permiso pendiente, pérdida de audio y seguridad conservan
+su texto completo. Cada texto largo usa tamaño vertical intrínseco; el contenido
+se desplaza cuando no cabe. La altura mínima se aplica al contenedor de pestañas,
+no a su hijo: la barra de pestañas no consume parte de una altura fija del hijo.
+No se encogen fuentes ni se eliminan advertencias para conseguir un verde.
+
+La prueba aloja la vista de llamadas real **y `NivoxContent`, el contenedor de
+pestañas usado por `NivoxApp`**, en ventanas AppKit de 780×560 y 1000×560 puntos.
+También comprueba el contenedor de pestañas a 1000×900. La ventana no puede crecer
+silenciosamente para acomodar el texto. Se recorren posiciones solapadas del
+`NSScrollView` real y se guardan capturas del viewport, no del documento oculto.
+
+Vision OCR reconoce los píxeles de cada captura. Se exige que aparezca cada tramo
+consecutivo de tres palabras de **todo** el contenido de routing, cierre/permiso,
+pérdida de audio, pie de seguridad, estado actual y (si procede) instalación.
+Solo se normalizan mayúsculas, acentos y puntuación; no se toleran palabras
+omitidas ni se aceptan etiquetas de accesibilidad como prueba de visibilidad.
+Las capturas solapadas permiten verificar párrafos partidos entre viewports.
+Un error OCR falla de forma cerrada y conserva el texto reconocido para diagnóstico;
+no equivale automáticamente a un defecto de la aplicación.
+
+La contraprueba recompila una **copia desechable** de `CallAudio.swift` que cambia
+los avisos de tamaño intrínseco a `.lineLimit(1)`. Ejecuta el mismo renderizador y
+oráculo: debe fallar específicamente con `significant text not visible` y guardar
+tramos ausentes. Un fallo de compilación, HAL, OCR o viewport no cuenta como una
+contraprueba válida. El candidato de producción nunca usa esa copia.
+
+## Otras aserciones y evidencia
+
+- Se compilan los cuerpos Swift de producción. La única transformación del
+  archivo de entrada es quitar `@main` de una copia de `NivoxApp` bajo `build/`.
+- `CallAudioModel` usa `nv_call_create_mac` y su cola real. Su inventario se coteja
+  contra otra enumeración HAL real; los endpoints virtuales no son opciones físicas.
 - Abrir el modelo no selecciona dispositivos ni habilita captura. Iniciar sin
-  selección se rechaza. El controlador real rechaza UIDs físicos inexistentes
-  con estado de error y diagnóstico, sin abrir ninguna ruta física.
-- Se aloja `CallAudioView` real en una ventana AppKit. Se conserva un PNG de su
-  renderizado, se exigen dimensiones mínimas y diversidad de píxeles. Esto
-  detecta una vista vacía; **no certifica legibilidad ni ausencia de clipping**.
-- Se ejercitan suspensión y salida mediante métodos del modelo real, esperando
-  la confirmación asíncrona de parada. No equivale a suspender la VM ni a cerrar
-  una llamada activa.
-- Se verifica que el estado de autorización de micrófono y los dispositivos
-  predeterminados del sistema no cambian.
-- Una segunda ejecución del mismo binario con la fase contraria debe fallar
-  específicamente por discrepancia del driver. No basta cualquier código de error.
+  selección se rechaza. El backend rechaza UIDs inexistentes con diagnóstico.
+- Suspensión y salida se ejercitan por métodos reales, esperando parada asíncrona.
+  Esto no equivale a suspender hardware ni cerrar una llamada activa.
+- TCC y dispositivos predeterminados deben quedar sin cambios. Se registra el
+  estado TCC inicial numérico; **puede estar autorizado previamente**. El paso
+  se llama `TCC unchanged`, no `no TCC grant`: no demuestra un permiso denegado.
+- La fase contraria del driver debe fallar específicamente por discrepancia HAL.
 
-Los artefactos de Actions incluyen `ui-mac-absent/` y `ui-mac-present/` con
-`runtime.json`, `report.json`, `commands.log` y `production-call-view.png`.
-El informe conserva hashes de fuentes y PNG. Se conserva evidencia fallida;
-`ok` solo cambia a true al completar todas las aserciones y la contraprueba.
+Los artefactos `ui-mac-absent/` y `ui-mac-present/` guardan `runtime.json`,
+`report.json`, `commands.log`, PNG por viewport/desplazamiento, `*-text.json` con
+OCR completo y `truncation-counterprobe/` con el fallo intencional. El informe
+conserva hashes de entradas y capturas. `ok` solo es true si pasan el candidato
+y ambas contrapruebas. Un fallo positivo mantiene evidencia y `ok: false`.
+
+El upload de CI conserva también todos los archivos nombrados por los manifiestos
+de build `SHA256SUMS`: los seis binarios/objetos Mac antes omitidos y los cuatro
+ejecutables Linux. El manifiesto de build no pretende cubrir los diagnósticos
+que se crean después. Tras descargar, se puede ejecutar `shasum -a 256 -c
+SHA256SUMS` desde `callaudio-mac/` (o `sha256sum -c` desde `callaudio-linux/`).
 
 ## Límites obligatorios
 
-Es un arnés que aloja vista/modelo de producción, **no lanzamiento del bundle
-entregado ni automatización de clics**. No solicita ni concede TCC, no modifica
-su base de datos, no usa AppleScript/Accessibility para eludir permisos y no
-relaja firma, instalador ni guardas del backend. La firma del arnés conserva
-hardened runtime y el entitlement de audio de producción. No hay release.
+Es un arnés con las vistas/modelo y el contenedor de producción, **no lanzamiento
+del bundle entregado ni automatización de clics**. No solicita/modifica TCC,
+no inyecta backend/permiso, no usa AppleScript/Accessibility para eludir permisos,
+ni relaja firma, instalador o backend. Mantiene hardened runtime y entitlement
+de audio. Solo usa la VM GitHub-hosted efímera; no toca una Mac personal ni crea
+una release. La CI pendiente no acredita que la UI Mac haya pasado.
 
-Requieren una Mac física y consentimiento del usuario: diálogo TCC real del
-bundle ad hoc y su persistencia tras actualizar; concesión/denegación/revocación;
-clics de selectores y menús; captura/reproducción con micrófono y auriculares
-reales; desconexión USB/Bluetooth; sueño/despertar de hardware; routing real en
-Zoom/Meet/Teams; calidad perceptual, latencia y estabilidad prolongada; Gatekeeper
-y experiencia de instalación. No hay modelos de aislamiento de hablante ni
-notarización. La CI de rutas virtuales existente no sustituye esos criterios.
-
-## Evidencia local de desarrollo
-
-En Linux se verificó rechazo explícito del arnés Mac, sintaxis Python y
-`git diff --check`. La suite `tests/test_call_audio.py --out build/ui-new-control`
-pasó release y ASan/UBSan (15 casos de controlador y 6 de glue por variante),
-con contrapruebas rechazadas. Esa suite usa I/O inyectada: **no acredita la UI
-Mac**. El resultado remoto debe consultarse por el SHA exacto publicado;
-un workflow pendiente no es una prueba verde.
+Siguen pendientes: diálogo TCC real del bundle ad hoc y persistencia al actualizar;
+concesión/denegación/revocación; clics de selectores/menús; audio con micrófono y
+auriculares físicos; USB/Bluetooth; sueño/despertar de hardware; routing en
+Zoom/Meet/Teams; calidad, latencia, estabilidad prolongada; Gatekeeper e instalación.
+Las rutas virtuales de CI no sustituyen esos criterios ni validan aislamiento
+de hablante o notarización.

@@ -4,6 +4,26 @@ import AppKit
 import SwiftUI
 import AVFoundation
 import CoreAudio
+import Vision
+
+// Compare every three-word span, not just labels or a prefix. Overlapping
+// viewport captures let a paragraph cross the scroll boundary without skipping
+// its middle/end. OCR errors fail closed and preserve pixels + recognized text.
+func normalizedWords(_ text: String) -> [String] {
+    text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_ES"))
+        .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+}
+func missingTextSpans(_ expected: [String], in recognized: [String]) -> [String] {
+    let pages = recognized.map { " " + normalizedWords($0).joined(separator: " ") + " " }
+    return expected.flatMap { text -> [String] in
+        let words = normalizedWords(text)
+        guard words.count >= 3 else { return [text] }
+        return (0...(words.count - 3)).compactMap { i in
+            let span = words[i..<(i + 3)].joined(separator: " ")
+            return pages.contains(where: { $0.contains(" " + span + " ") }) ? nil : span
+        }
+    }
+}
 import NivoxCallAudio
 
 @main struct CallAudioUISmoke {
@@ -26,8 +46,90 @@ import NivoxCallAudio
         if status != noErr { fputs("FAIL: cannot read CoreAudio defaults\n", stderr); exit(1) }
         return device
     }
+    @MainActor static func scrollViews(_ view: NSView) -> [NSScrollView] {
+        (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews($0) }
+    }
+    @MainActor static func render(_ model: CallAudioModel, out: URL, width: Int, height: Int,
+                                  tabbed: Bool) async -> [String: Any] {
+        await settled(model)
+        // The tabbed variant hosts the same root used by NivoxApp, including TabView.
+        let root = tabbed ? AnyView(NivoxContent(probe: AudioProbe(), calls: model))
+                          : AnyView(CallAudioView(audio: model))
+        let host = NSHostingView(rootView: root)
+        host.sizingOptions = [] // Do not silently grow the requested viewport to fit.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Nivox production call view · CI"
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        host.layoutSubtreeIfNeeded()
+        require(abs(host.bounds.width - CGFloat(width)) < 1 && abs(host.bounds.height - CGFloat(height)) < 1,
+                "viewport expanded instead of preserving requested dimensions")
+        let name = "\(tabbed ? "tabbed" : "call")-\(width)x\(height)"
+        let scrolls = scrollViews(host).filter { !$0.isHidden && $0.documentView != nil }
+        require(scrolls.count == 1, "expected one visible production scroll view")
+        let scroll = scrolls[0]
+        let clip = scroll.contentView
+        let maxY = max(0, scroll.documentView!.bounds.height - clip.bounds.height)
+        let step = max(1, clip.bounds.height * 0.45)
+        let offsets = Array(stride(from: CGFloat(0), to: maxY, by: step)) + [maxY]
+        require(offsets.count <= 12, "unexpected unbounded document height")
+        var pages: [String] = []
+        var captures: [[String: Any]] = []
+        for (index, y) in offsets.enumerated() {
+            clip.scroll(to: NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(clip)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            host.layoutSubtreeIfNeeded()
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                require(false, "production view could not allocate render bitmap"); return [:]
+            }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let filename = "\(name)-\(index).png"
+            guard let png = bitmap.representation(using: .png, properties: [:]), let image = bitmap.cgImage else {
+                require(false, "PNG encoding failed"); return [:]
+            }
+            do { try png.write(to: out.appendingPathComponent(filename)) }
+            catch { require(false, "PNG write failed: \(error)") }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["es-ES", "en-US"]
+            request.usesLanguageCorrection = false
+            do { try VNImageRequestHandler(cgImage: image).perform([request]) }
+            catch { require(false, "Vision OCR failed: \(error)") }
+            let recognized = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+            pages.append(recognized)
+            captures.append(["png": filename, "scroll_y": y, "recognized": recognized,
+                             "pixel_width": bitmap.pixelsWide, "pixel_height": bitmap.pixelsHigh])
+        }
+        var expected = [CallAudioCopy.routing, CallAudioCopy.lifecycle, CallAudioModel.routingWarning,
+                        CallAudioCopy.safety, model.status]
+        if !model.driver { expected.append(CallAudioCopy.missingDriver) }
+        let missing = missingTextSpans(expected, in: pages)
+        let record: [String: Any] = ["viewport_width": width, "viewport_height": height,
+            "tabbed_production_root": tabbed, "captures": captures, "missing_spans": missing,
+            "expected_paragraphs": expected, "ok": missing.isEmpty]
+        do {
+            try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+                .write(to: out.appendingPathComponent("\(name)-text.json"))
+        } catch { require(false, "OCR evidence write failed: \(error)") }
+        require(missing.isEmpty, "significant text not visible in \(name): \(missing.joined(separator: " | "))")
+        window.close()
+        return record
+    }
     @MainActor static func exercise() async {
         let args = CommandLine.arguments
+        require(missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos tres\ncuatro cinco"]).isEmpty,
+                "text oracle rejected line wrapping")
+        require(!missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos tres…"]).isEmpty,
+                "text oracle accepted a truncated suffix")
+        require(!missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos cuatro cinco"]).isEmpty,
+                "text oracle accepted missing middle words")
+        require(missingTextSpans(["Uno dos tres cuatro cinco"], in: ["Uno dos tres cuatro", "dos tres cuatro cinco"]).isEmpty,
+                "text oracle rejected overlapping scroll captures")
         require(args.count == 3, "usage: ui-smoke OUTPUT_DIRECTORY absent|present")
         let out = URL(fileURLWithPath: args[1], isDirectory: true)
         let expectedDriver = args[2] == "present"
@@ -59,32 +161,12 @@ import NivoxCallAudio
         require(!String(cString: nv_call_detail(real)).isEmpty, "backend rejection lacks diagnostic")
         nv_call_stop(real)
         require(Int(nv_call_state(real)) == Int(NV_CALL_STOPPED), "backend stop failed")
-        // A real AppKit window and unmodified production SwiftUI view, not a fixture view.
-        let host = NSHostingView(rootView: CallAudioView(audio: model))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 900),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.title = "Nivox production call view · CI"
-        window.contentView = host
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        try? await Task.sleep(nanoseconds: 700_000_000)
-        host.layoutSubtreeIfNeeded()
-        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
-            require(false, "production view could not allocate render bitmap"); return
+        var textChecks: [[String: Any]] = []
+        for width in [780, 1000] {
+            textChecks.append(await render(model, out: out, width: width, height: 560, tabbed: false))
+            textChecks.append(await render(model, out: out, width: width, height: 560, tabbed: true))
         }
-        host.cacheDisplay(in: host.bounds, to: bitmap)
-        require(bitmap.pixelsWide >= 780 && bitmap.pixelsHigh >= 560, "render smaller than production minimum")
-        var colors = Set<String>()
-        for y in stride(from: 0, to: bitmap.pixelsHigh, by: 8) {
-            for x in stride(from: 0, to: bitmap.pixelsWide, by: 8) {
-                if let color = bitmap.colorAt(x: x, y: y) { colors.insert(color.description) }
-            }
-        }
-        require(colors.count > 16, "blank/unrendered production view")
-        guard let png = bitmap.representation(using: .png, properties: [:]) else { require(false, "PNG encoding failed"); return }
-        do { try png.write(to: out.appendingPathComponent("production-call-view.png")) }
-        catch { require(false, "PNG write failed: \(error)") }
+        textChecks.append(await render(model, out: out, width: 1000, height: 900, tabbed: true))
         model.handleLifecycle(NV_CALL_UI_SLEEP)
         await settled(model)
         require(!model.enabled && model.status.hasPrefix("Suspensión:"), "real model sleep did not complete stop")
@@ -100,15 +182,15 @@ import NivoxCallAudio
             "sleep_stop_completed": true, "quit_stop_completed": true,
             "tcc_unchanged": true, "system_defaults_unchanged": true,
             "tcc_authorization_raw": permissionBefore.rawValue,
-            "pixel_width": bitmap.pixelsWide, "pixel_height": bitmap.pixelsHigh,
-            "sampled_colors": colors.count, "microphone_capture_tested": false,
+            "text_visibility_checks": textChecks, "significant_text_visible": true,
+            "text_oracle_selftests_passed": true,
+            "microphone_capture_tested": false,
             "user_clicks_tested": false, "tcc_prompt_tested": false]
         do {
             let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: out.appendingPathComponent("runtime.json"))
             print(String(decoding: data, as: UTF8.self))
         } catch { require(false, "report write failed: \(error)") }
-        window.close()
         exit(0)
     }
     @MainActor static func main() {
