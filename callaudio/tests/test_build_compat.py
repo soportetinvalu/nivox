@@ -15,7 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from callaudio.tools.build_callaudio import ASPL, ASPL_SHA, fix_aspl_stream_format, safe_extract
+from callaudio.tools.build_callaudio import ASPL, ASPL_SHA, create_package_stage, fix_aspl_stream_format, safe_extract
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -103,6 +103,29 @@ int main() { return 0; }
         fix_aspl_stream_format(self.aspl)
         new = compile_initializer(self.header.read_text(), 'corrected')
         self.assertEqual(new.returncode, 0, new.stdout + new.stderr)
+
+
+class PackagingTests(unittest.TestCase):
+    def test_stage_preserves_cli_and_uses_casefold_distinct_namespace(self):
+        base = ROOT / 'build/packaging-regression-tmp'
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as directory:
+            out = Path(directory)
+            cli = out / 'nivox-callaudio'
+            cli.write_bytes(b'packaging fixture, not a Mach-O binary')
+            stage = create_package_stage(out)
+            # Enforce the macOS path constraint even on case-sensitive Linux.
+            self.assertNotEqual(stage.relative_to(out).parts[0].casefold(), cli.name.casefold(),
+                                'package staging collides with CLI on case-insensitive macOS')
+            self.assertEqual(stage.name, 'Nivox-CallAudio')
+            self.assertTrue(stage.is_dir())
+            self.assertEqual(cli.read_bytes(), b'packaging fixture, not a Mach-O binary')
+            marker = stage / 'retained.txt'
+            marker.write_text('retain existing staging; never merge or overwrite it')
+            with self.assertRaises(FileExistsError):
+                create_package_stage(out)
+            self.assertEqual(marker.read_text(), 'retain existing staging; never merge or overwrite it')
+            self.assertEqual(cli.read_bytes(), b'packaging fixture, not a Mach-O binary')
 
 
 if __name__ == '__main__':

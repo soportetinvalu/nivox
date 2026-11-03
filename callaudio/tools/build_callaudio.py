@@ -161,6 +161,14 @@ def fix_aspl_stream_format(aspl):
             'patched_sha256': digest(header), 'change': 'designator order only'}
 
 
+def create_package_stage(out):
+    # macOS commonly uses case-insensitive APFS: the CLI nivox-callaudio
+    # and the archive root Nivox-CallAudio must not be siblings.
+    stage = out / 'package-stage' / 'Nivox-CallAudio'
+    stage.mkdir(parents=True)
+    return stage
+
+
 def mac(run, out, report):
     sdk = run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()
     report['sdk'] = run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip()
@@ -246,8 +254,7 @@ def mac(run, out, report):
     if not report['mac_clock_stress'].get('ok'):
         raise RuntimeError('Mac host-time concurrent read test failed')
     # ZIP (app + driver + tools + scripts + notices), re-verified after extraction.
-    stage = out / 'Nivox-CallAudio'
-    stage.mkdir()
+    stage = create_package_stage(out)
     shutil.copytree(app_out / 'Nivox.app', stage / 'Nivox.app', symlinks=True)
     shutil.copytree(drv, stage / 'NivoxAudio.driver', symlinks=True)
     for name in tools:

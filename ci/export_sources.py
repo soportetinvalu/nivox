@@ -34,6 +34,7 @@ FILES = [
     'callaudio/core/nv_watch.h', 'callaudio/core/nv_signal.h', 'callaudio/mac/audio-input.entitlements',
     'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
     'callaudio/tests/test_mac_clock.c', 'callaudio/tests/test_installer.py',
+    'callaudio/tests/test_build_compat.py',
     'callaudio/tests/test_call_mac_contract.c',
     'tests/test_call_lifecycle_swift.py',
     'docs/CALL_AUDIO_SAFE_INTEGRATION.md', 'docs/CALL_AUDIO_SAFE_EVIDENCE.json',
