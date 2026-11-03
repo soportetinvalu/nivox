@@ -83,7 +83,44 @@ import NivoxCallAudio
             require(abs(Int(pixels[4]) - (level == 255 ? 127 : 0)) <= 1,
                     "antialiased pixel was not alpha blended")
             require(Array(pixels[8..<11]) == [255, 141, 40], "opaque warning pixel changed")
+            let sampled = ocrSnapshot(image)
+            require(sampled.width == 54 && sampled.height == 50 && sampled.alphaInfo == .noneSkipLast,
+                    "OCR sampling geometry/opacity changed")
+            let samples = [UInt8](sampled.dataProvider!.data! as Data)
+            for x in 0..<3 {
+                for dx in 0..<2 {
+                    for dy in 0..<2 {
+                        let offset = ((24 + dy) * sampled.width + 24 + x * 2 + dx) * 4
+                        require(Array(samples[offset..<(offset + 3)]) == Array(pixels[(x * 4)..<(x * 4 + 3)]),
+                                "OCR sampling changed a source pixel")
+                    }
+                }
+            }
+            require(Array(samples[0..<3]) == [255, 255, 255], "OCR border must be blank")
         }
+    }
+    // Normalize raster sampling, not words: Vision at 1x dropped the visible E
+    // in "En" and c in "cambia" in the genuine incident PNG (run 41706083678).
+    // Nearest-neighbour 2x preserves every source pixel; the border supplies
+    // image context only. The strict span oracle and real truncation mutation
+    // remain unchanged. Keep the exact OCR input as evidence.
+    @MainActor static func ocrSnapshot(_ source: CGImage) -> CGImage {
+        let scale = 2, border = 24
+        let width = source.width * scale + border * 2
+        let height = source.height * scale + border * 2
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height,
+                  bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            fatalError("cannot allocate OCR sampling context")
+        }
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .none
+        context.draw(source, in: CGRect(x: border, y: border,
+                     width: source.width * scale, height: source.height * scale))
+        guard let image = context.makeImage() else { fatalError("cannot encode OCR sampling context") }
+        return image
     }
     @MainActor static func recognizedText(_ image: CGImage) -> String {
         let request = VNRecognizeTextRequest()
@@ -111,13 +148,20 @@ import NivoxCallAudio
                         "Reenvío apagado. Para seguir una llamada, selecciona dispositivos físicos en esa app."]
         let rawText = recognizedText(raw)
         let image = opaqueSnapshot(raw, background: .white) // Fixture was captured in light appearance.
-        let text = recognizedText(image)
+        let nativeText = recognizedText(image)
+        let sampled = ocrSnapshot(image)
+        let text = recognizedText(sampled)
         let missing = missingTextSpans(expected, in: [text])
         let rawMissing = missingTextSpans(expected, in: [rawText])
         let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!
         do {
             try png.write(to: out.appendingPathComponent("snapshot-regression.png"))
+            try NSBitmapImageRep(cgImage: sampled).representation(using: .png, properties: [:])!
+                .write(to: out.appendingPathComponent("snapshot-regression-ocr.png"))
             let record: [String: Any] = ["recognized": text, "raw_recognized": rawText,
+                "native_recognized": nativeText,
+                "native_missing_spans": missingTextSpans(expected, in: [nativeText]),
+                "ocr_scale": 2, "ocr_border_pixels": 24,
                 "missing_spans": missing, "raw_missing_spans": rawMissing]
             try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
                 .write(to: out.appendingPathComponent("snapshot-regression.json"))
@@ -185,9 +229,16 @@ import NivoxCallAudio
                 try rawPNG.write(to: out.appendingPathComponent(rawFilename))
                 try png.write(to: out.appendingPathComponent(filename))
             } catch { require(false, "PNG write failed: \(error)") }
-            let recognized = recognizedText(image)
+            let ocrImage = ocrSnapshot(image)
+            let ocrFilename = "\(name)-\(index)-ocr.png"
+            do {
+                try NSBitmapImageRep(cgImage: ocrImage).representation(using: .png, properties: [:])!
+                    .write(to: out.appendingPathComponent(ocrFilename))
+            } catch { require(false, "OCR input PNG write failed: \(error)") }
+            let recognized = recognizedText(ocrImage)
             pages.append(recognized)
-            captures.append(["png": filename, "raw_png": rawFilename, "opaque_window_background": true,
+            captures.append(["png": filename, "raw_png": rawFilename, "ocr_png": ocrFilename,
+                             "ocr_scale": 2, "ocr_border_pixels": 24, "opaque_window_background": true,
                              "scroll_y": y, "recognized": recognized,
                              "pixel_width": bitmap.pixelsWide, "pixel_height": bitmap.pixelsHigh])
         }

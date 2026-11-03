@@ -117,6 +117,40 @@ contrapruebas. Linux no dispone de AppKit: **no acredita compilación semántica
 AppKit, ejecución de este nuevo decoder nativo ni visibilidad Mac**. Esos
 resultados siguen pendientes de la nueva CI; no se espera su terminación.
 
+## Incidente de ejecución del run 41706083678
+
+Sobre `40dab08926b0b9355adbe77e5b084953a5a91acc`, el job Mac
+`126162427503` compiló y firmó `ui-smoke`. El decoder pasó los tres casos y
+rechazó el inicializador original con el diagnóstico esperado. El ejecutable
+salió con RC1 en `snapshotIncidentRegression`, **antes de renderizar los
+viewports actuales**:
+
+```text
+FAIL: opaque original capture still loses significant text: ["en zoom meet", "nivox no cambia", "no cambia los", "cambia los dispositivos"]
+```
+
+Artefacto: `13265504356`,
+`nivox-callaudio-arm64-adhoc-41706083678-1`, SHA-256 del ZIP descargado
+`a0cf5842c470608cb83d8d934806ebb93cc733a0740de910a8acf643a3789841`.
+Su `snapshot-regression.json` reconoce `n Zoom, Meet…` y `ambia los dispositivos…`,
+pero el PNG opaco muestra las letras iniciales completas. Es una omisión de
+Vision sobre píxeles presentes; no demuestra truncado de la vista actual. La
+composición alpha ya funciona, pero por sí sola no basta para este OCR.
+
+El arnés prepara ahora una entrada OCR 2× con vecino más próximo y un borde
+blanco de 24 píxeles. No cambia fuentes, viewport, textos esperados, tolerancias
+ni el oráculo; no añade letras ni usa corrección lingüística. Conserva PNG raw,
+opaco y `*-ocr.png`, y en la regresión conserva también OCR nativo 1× para
+comparación. El mismo tratamiento se aplica al candidato y a `.lineLimit(1)`.
+La autoprueba nativa exige que cada píxel RGB de origen se replique exactamente
+en cuatro píxeles, con geometría, opacidad y borde correctos, sobre blanco y negro.
+
+**Estado de esta intervención:** la omisión OCR está acreditada con el artefacto
+real; el muestreo 2× es una corrección candidata que requiere ejecutar Vision
+en la CI Mac. No se declara que haya resuelto el incidente hasta que pasen la
+regresión histórica, todos los viewports y la contraprueba de truncado. Las
+pruebas Linux de control/lifecycle y el parseo Swift no sustituyen esa ejecución.
+
 ## Otras aserciones y evidencia
 
 - Se compilan los cuerpos Swift de producción. La única transformación del
