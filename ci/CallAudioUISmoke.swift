@@ -46,6 +46,79 @@ import NivoxCallAudio
         if status != noErr { fputs("FAIL: cannot read CoreAudio defaults\n", stderr); exit(1) }
         return device
     }
+    // cacheDisplay captures the transparent hosting view, NOT the NSWindow
+    // backing. Vision treats that alpha as black, hiding ordinary black text.
+    // Composite only the captured pixels onto the real window background.
+    @MainActor static func opaqueSnapshot(_ source: CGImage, background: NSColor) -> CGImage {
+        guard let color = background.usingColorSpace(.sRGB),
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: source.width, height: source.height,
+                  bitsPerComponent: 8, bytesPerRow: source.width * 4, space: space,
+                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            fatalError("cannot allocate opaque viewport context")
+        }
+        context.setFillColor(red: color.redComponent, green: color.greenComponent,
+                             blue: color.blueComponent, alpha: 1)
+        let rect = CGRect(x: 0, y: 0, width: CGFloat(source.width), height: CGFloat(source.height))
+        context.fill(rect)
+        context.draw(source, in: rect)
+        guard let image = context.makeImage() else { fatalError("cannot encode opaque viewport") }
+        return image
+    }
+    @MainActor static func snapshotSelftest() {
+        // Transparent black, 50% black, opaque orange: white AND dark backings.
+        // This exercises the exact compositor used for OCR, not a Python model.
+        let bytes = Data([0, 0, 0, 0, 0, 0, 0, 128, 255, 141, 40, 255])
+        let provider = CGDataProvider(data: bytes as CFData)!
+        let source = CGImage(width: 3, height: 1, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 12, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        for (background, level) in [(NSColor.white, 255), (NSColor.black, 0)] {
+            let image = opaqueSnapshot(source, background: background)
+            require(image.alphaInfo == .noneSkipLast, "viewport still carries transparency")
+            let pixels = [UInt8](image.dataProvider!.data! as Data)
+            require(Array(pixels[0..<3]) == [UInt8](repeating: UInt8(level), count: 3),
+                    "transparent text background was not composited")
+            require(abs(Int(pixels[4]) - (level == 255 ? 127 : 0)) <= 1,
+                    "antialiased pixel was not alpha blended")
+            require(Array(pixels[8..<11]) == [255, 141, 40], "opaque warning pixel changed")
+        }
+    }
+    @MainActor static func recognizedText(_ image: CGImage) -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["es-ES", "en-US"]
+        request.usesLanguageCorrection = false
+        do { try VNImageRequestHandler(cgImage: image).perform([request]) }
+        catch { require(false, "Vision OCR failed: \(error)") }
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+    @MainActor static func snapshotIncidentRegression(out: URL) {
+        // Genuine transparent capture from failed run 41701415863, not a mock.
+        let fixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tests/fixtures/call-ui-transparent-41701415863.png")
+        guard let bitmap = NSBitmapImageRep(contentsOf: fixture), let raw = bitmap.cgImage else {
+            require(false, "missing original transparent capture fixture"); return
+        }
+        let expected = [CallAudioCopy.routing, CallAudioCopy.lifecycle,
+                        "Reenvío apagado. Para seguir una llamada, selecciona dispositivos físicos en esa app."]
+        let rawText = recognizedText(raw)
+        let image = opaqueSnapshot(raw, background: .white) // Fixture was captured in light appearance.
+        let text = recognizedText(image)
+        let missing = missingTextSpans(expected, in: [text])
+        let rawMissing = missingTextSpans(expected, in: [rawText])
+        let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!
+        do {
+            try png.write(to: out.appendingPathComponent("snapshot-regression.png"))
+            let record: [String: Any] = ["recognized": text, "raw_recognized": rawText,
+                "missing_spans": missing, "raw_missing_spans": rawMissing]
+            try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+                .write(to: out.appendingPathComponent("snapshot-regression.json"))
+        } catch { require(false, "snapshot regression evidence write failed: \(error)") }
+        require(!rawMissing.isEmpty, "original transparent capture did not reproduce OCR failure")
+        require(missing.isEmpty, "opaque original capture still loses significant text: \(missing)")
+    }
     @MainActor static func scrollViews(_ view: NSView) -> [NSScrollView] {
         (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews($0) }
     }
@@ -89,20 +162,27 @@ import NivoxCallAudio
             }
             host.cacheDisplay(in: host.bounds, to: bitmap)
             let filename = "\(name)-\(index).png"
-            guard let png = bitmap.representation(using: .png, properties: [:]), let image = bitmap.cgImage else {
+            guard let rawPNG = bitmap.representation(using: .png, properties: [:]), let rawImage = bitmap.cgImage else {
                 require(false, "PNG encoding failed"); return [:]
             }
-            do { try png.write(to: out.appendingPathComponent(filename)) }
-            catch { require(false, "PNG write failed: \(error)") }
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["es-ES", "en-US"]
-            request.usesLanguageCorrection = false
-            do { try VNImageRequestHandler(cgImage: image).perform([request]) }
-            catch { require(false, "Vision OCR failed: \(error)") }
-            let recognized = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+            var composite: CGImage?
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                composite = opaqueSnapshot(rawImage, background: window.backgroundColor)
+            }
+            guard let image = composite,
+                  let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                require(false, "opaque PNG encoding failed"); return [:]
+            }
+            require(image.alphaInfo == .noneSkipLast, "OCR viewport must be opaque")
+            let rawFilename = "\(name)-\(index)-raw.png"
+            do {
+                try rawPNG.write(to: out.appendingPathComponent(rawFilename))
+                try png.write(to: out.appendingPathComponent(filename))
+            } catch { require(false, "PNG write failed: \(error)") }
+            let recognized = recognizedText(image)
             pages.append(recognized)
-            captures.append(["png": filename, "scroll_y": y, "recognized": recognized,
+            captures.append(["png": filename, "raw_png": rawFilename, "opaque_window_background": true,
+                             "scroll_y": y, "recognized": recognized,
                              "pixel_width": bitmap.pixelsWide, "pixel_height": bitmap.pixelsHigh])
         }
         var expected = [CallAudioCopy.routing, CallAudioCopy.lifecycle, CallAudioModel.routingWarning,
@@ -161,6 +241,8 @@ import NivoxCallAudio
         require(!String(cString: nv_call_detail(real)).isEmpty, "backend rejection lacks diagnostic")
         nv_call_stop(real)
         require(Int(nv_call_state(real)) == Int(NV_CALL_STOPPED), "backend stop failed")
+        snapshotSelftest()
+        snapshotIncidentRegression(out: out)
         var textChecks: [[String: Any]] = []
         for width in [780, 1000] {
             textChecks.append(await render(model, out: out, width: width, height: 560, tabbed: false))
@@ -184,6 +266,7 @@ import NivoxCallAudio
             "tcc_authorization_raw": permissionBefore.rawValue,
             "text_visibility_checks": textChecks, "significant_text_visible": true,
             "text_oracle_selftests_passed": true,
+            "opaque_capture_selftests_passed": true, "original_capture_regression_passed": true,
             "microphone_capture_tested": false,
             "user_clicks_tested": false, "tcc_prompt_tested": false]
         do {

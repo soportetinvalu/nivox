@@ -30,7 +30,8 @@ def main():
     out.mkdir(parents=True)
     report = {'ok': False, 'scope': 'production call view and tabbed root hosted in test process + real HAL + pixel OCR; not packaged app launch or click automation',
               'driver': args.driver, 'commands': [], 'input_hashes': {}}
-    for name in ['App/NoiseProbeApp.swift', 'App/CallAudio.swift', 'ci/CallAudioUISmoke.swift', 'tests/test_call_ui_mac.py']:
+    for name in ['App/NoiseProbeApp.swift', 'App/CallAudio.swift', 'ci/CallAudioUISmoke.swift',
+                 'tests/test_call_ui_mac.py', 'tests/fixtures/call-ui-transparent-41701415863.png']:
         report['input_hashes'][name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
     # Preserve every production declaration/body; only relocate the entry point.
     source = (ROOT / 'App/NoiseProbeApp.swift').read_text()
@@ -65,6 +66,7 @@ def main():
             run([binary, out, args.driver])
             runtime = json.loads((out / 'runtime.json').read_text())
             assert runtime['ok'] and runtime['phase'] == args.driver
+            assert runtime['opaque_capture_selftests_passed'] and runtime['original_capture_regression_passed']
             # Counterprobe: same binary must specifically reject the opposite HAL phase.
             negative = out / 'counterprobe'
             negative.mkdir()

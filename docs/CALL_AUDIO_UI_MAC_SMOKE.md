@@ -43,6 +43,47 @@ oráculo: debe fallar específicamente con `significant text not visible` y guar
 tramos ausentes. Un fallo de compilación, HAL, OCR o viewport no cuenta como una
 contraprueba válida. El candidato de producción nunca usa esa copia.
 
+## Incidente de captura del run 41701415863
+
+El job Mac `126146365535` compiló correctamente y llegó al primer viewport; el
+oráculo declaró 116 tramos ausentes. La captura RGBA contenía 435803 píxeles con
+alpha menor que 255 y 80126 píxeles negros con alpha no nulo. El OCR conservaba
+los avisos naranjas, pero perdía el texto negro: `cacheDisplay` había capturado
+la vista transparente sin el fondo de `NSWindow`. Componer esa captura sobre
+blanco para inspección recupera visualmente routing, estado y cierre sin cambiar
+el layout. Esto identifica un fallo del arnés, no demuestra aún que pasen todos
+los viewports ni descarta otros defectos de la UI.
+
+Se conserva el PNG original, byte a byte, como
+`tests/fixtures/call-ui-transparent-41701415863.png` (780×560), SHA-256
+`09337c01d803a951d484da32bc774e4e6e8bd3c09f8e3ebd4afd82986ab1f94f`.
+Procede de `ui-mac-absent/call-780x560-0.png` del artefacto
+`nivox-callaudio-arm64-adhoc-41701415863-1`:
+<https://github.com/soportetinvalu/nivox/actions/runs/41701415863/job/126146365535>.
+No contiene datos de usuario: es la vista inicial del runner efímero, sin
+selecciones de dispositivos ni captura de audio.
+
+El arnés ahora compone los píxeles sobre `window.backgroundColor`, resuelto bajo
+la apariencia efectiva de esa ventana, en un bitmap sin alpha antes de OCR.
+No añade texto, cambia fuentes ni amplía el viewport. Guarda el PNG transparente
+`*-raw.png` y el PNG opaco que se reconoce. Se mantiene el oráculo estricto de
+tramos y la contraprueba `.lineLimit(1)` sin cambios.
+
+Antes de los viewports, el código nativo exige:
+
+- Composición correcta de píxeles transparentes, semitransparentes y opacos sobre
+  blanco y negro, preservando el naranja opaco.
+- Reproducción del fallo OCR con el PNG original transparente y lectura completa
+  de routing, cierre y estado al componer ese mismo PNG. Guarda ambos textos,
+  sus tramos ausentes y `snapshot-regression.png`; no admite un fallo arbitrario.
+
+Comprobaciones locales de la corrección: inspección alpha y composición con
+Pillow sobre el artefacto real; `py_compile` del runner; suite C de control y
+contrato con HAL simulado en release y ASan+UBSan, incluidas sus mutaciones.
+Ninguna de ellas compila Swift/AppKit ni ejecuta Vision. La regresión nativa y
+la visibilidad completa solo quedan acreditadas cuando finalice verde la CI
+Mac del commit corrector; no se atribuye ese resultado a la inspección Linux.
+
 ## Otras aserciones y evidencia
 
 - Se compilan los cuerpos Swift de producción. La única transformación del
