@@ -58,6 +58,8 @@ jobs:
         run: |
           [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
           [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]] || { echo 'refusing: runner already has Nivox installed'; exit 1; }
+      - name: Swift C lifecycle type regression (real compiler, positive and negative cases)
+        run: python3 tests/test_call_lifecycle_swift.py --out build/lifecycle-swift-mac
       - name: Require Apple Silicon, build app + driver + engine, sign ad hoc, package
         shell: bash
         run: |
@@ -149,5 +151,7 @@ jobs:
             build/callaudio-mac/*.log
             build/callaudio-mac/app-build/report.json
             build/callaudio-mac/app-build/commands.log
+            build/lifecycle-swift-mac/report.json
+            build/lifecycle-swift-mac/commands.log
           if-no-files-found: warn
           retention-days: 7

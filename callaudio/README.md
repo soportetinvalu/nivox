@@ -41,6 +41,13 @@ Estado: **experimental, no es una entrega final**. El núcleo portable se prueba
 
 ## Pruebas
 
+Regresión Swift/C del ciclo de vida (Linux o Darwin, con `swiftc` real):
+`python3 tests/test_call_lifecycle_swift.py --out build/lifecycle-swift`.
+Acepta `--swiftc <ruta>` si el compilador no está en `PATH`. Compila el método de
+producción extraído contra el módulo C real, ejecuta la matriz de eventos y exige
+que la firma antigua y la ausencia de conversión fallen por el diagnóstico de
+tipos esperado. No compila SwiftUI/AppKit ni acredita una compilación Mac.
+
 Linux (`python3 callaudio/tools/build_callaudio.py --target linux --out build/<nuevo>`):
 
 - `nv_clock`: monotonía, coherencia entre host y muestra, 24 h.

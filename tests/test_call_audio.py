@@ -37,7 +37,7 @@ def check_swift_contract(app, model):
     assert 'MenuBarExtra' in app and 'openWindow(id: "nivox-main")' in model
     assert 'self.generation == token, self.enabled' in model
     assert 'self.permissionGeneration == token' in app
-    assert 'nv_call_ui_should_stop(event, requestingPermission ? 1 : 0)' in model
+    assert 'nv_call_ui_should_stop(Int32(event), requestingPermission ? 1 : 0)' in model
     assert 'submit(.stop, token: generation)' in model and 'finished?()' in model
     assert '.userInitiatedAllowingIdleSystemSleep' in model and 'forMode: .common' in model
     init = model.split('    init() {', 1)[1].split('    deinit', 1)[0]

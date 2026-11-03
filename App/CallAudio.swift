@@ -173,9 +173,10 @@ private final class CallEngine: @unchecked Sendable {
             finished?()
         }
     }
-    func handleLifecycle(_ event: Int32) {
+    // Anonymous C enum constants import as Int; C int parameters import as Int32.
+    func handleLifecycle(_ event: Int) {
         guard !terminating else { return }
-        if nv_call_ui_should_stop(event, requestingPermission ? 1 : 0) != 0 {
+        if nv_call_ui_should_stop(Int32(event), requestingPermission ? 1 : 0) != 0 {
             let reason = event == NV_CALL_UI_SLEEP
                 ? "Suspensión: reenvío detenido. No se reanuda solo. Revisa los dispositivos y vuelve a iniciar; si tu llamada usa Nivox, no recibirá audio de estas rutas."
                 : "Solicitud de micrófono cancelada al ocultar la ventana. No se iniciará audio al responder al permiso; vuelve a iniciar explícitamente."

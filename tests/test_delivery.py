@@ -130,7 +130,7 @@ class DeliveryTests(unittest.TestCase):
                     'callaudio/mac/audio-input.entitlements', 'callaudio/control/nv_call_ui.h',
                     'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
                     'callaudio/tests/test_installer.py', 'callaudio/tests/test_mac_clock.c',
-                    'callaudio/tests/test_call_mac_contract.c'}
+                    'callaudio/tests/test_call_mac_contract.c', 'tests/test_call_lifecycle_swift.py'}
         self.assertTrue(required <= set(payload))
 
     def test_source_manifest_matches_payload(self):
