@@ -66,7 +66,12 @@ int nv_path_open(nv_path *p, const char *name, AudioObjectID in_dev, uint32_t in
     p->out = nv_io_open(out_dev, 0, out_ch, on_output, p, &st);
     if (!p->out) { snprintf(err, errlen, "%s: open output failed (OSStatus %d)", name, (int)st); nv_path_close(p); return -1; }
     uint32_t mb = nv_io_max_frames(p->in) > nv_io_max_frames(p->out) ? nv_io_max_frames(p->in) : nv_io_max_frames(p->out);
-    nv_bridge_config cfg = {(uint32_t)in_rate, in_ch, (uint32_t)out_rate, out_ch, mb, p->target_fill, o->strength, 2000};
+    /* A nonzero matching HAL clock domain guarantees no relative drift.
+     * Keep adaptive SRC for unrelated/unknown clocks (physical endpoints).
+     * Do not mistake capture vs future presentation timestamps for drift. */
+    uint32_t in_clock = nv_device_clock_domain(in_dev), out_clock = nv_device_clock_domain(out_dev);
+    double max_ppm = in_clock && in_clock == out_clock ? 0 : 2000;
+    nv_bridge_config cfg = {(uint32_t)in_rate, in_ch, (uint32_t)out_rate, out_ch, mb, p->target_fill, o->strength, max_ppm};
     p->bridge = nv_bridge_create(&cfg);
     if (!p->bridge) { snprintf(err, errlen, "%s: bridge create failed", name); nv_path_close(p); return -1; }
     return 0;

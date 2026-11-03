@@ -105,6 +105,15 @@ def test_thread_stall(run, exe):
     return result
 
 
+def test_shared_clock_mode(run, exe):
+    positive = last_json(run([exe, '--shared-clock-only']))
+    mutated = run([exe, '--shared-clock-only', '--adaptive-shared-clock'], check=False)
+    negative = last_json(mutated)
+    if positive.get('ok') is not True or negative.get('ok') is not False or not negative.get('adaptive_mutation') or 'shared-clock pitch steered' not in mutated:
+        raise RuntimeError('shared-clock oracle did not reject adaptive pitch steering')
+    return {'fixed_ratio': positive, 'adaptive_countertest': negative}
+
+
 def linux(run, out, report):
     cc = shutil.which('cc') or 'cc'
     report['compiler'] = run([cc, '--version']).splitlines()[0]
@@ -114,6 +123,7 @@ def linux(run, out, report):
     wrap = ['-DWRAP_ALLOC'] + ['-Wl,--wrap=' + f for f in ['malloc', 'calloc', 'realloc', 'free']]
     run([cc, '-O2', *WARN, *INC, *sinc, CA / 'tests/test_core.c', *CORE_C, lib, '-lm', '-pthread', *wrap, '-o', exe])
     report['release'] = last_json(run([exe]))
+    report['shared_clock_mode'] = test_shared_clock_mode(run, exe)
     report['thread_stall_countertest'] = test_thread_stall(run, exe)
     report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
     if report['muted_denoiser_countertest'].get('ok') is not False:
@@ -244,6 +254,7 @@ def mac(run, out, report):
         if report['app_build'].get(key) is not True:
             raise RuntimeError(f'app build did not prove {key}')
     report['core_tests'] = last_json(run([exe]))
+    report['shared_clock_mode'] = test_shared_clock_mode(run, exe)
     report['thread_stall_countertest'] = test_thread_stall(run, exe)
     report['muted_denoiser_countertest'] = last_json(run([exe, '--denoise-only', '--mute-denoise-output'], check=False))
     if report['muted_denoiser_countertest'].get('ok') is not False:

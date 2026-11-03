@@ -71,7 +71,7 @@ typedef struct nv_bridge_config {
     uint32_t max_block;              /* largest callback block (frames) */
     uint32_t target_fill;            /* FIFO target at 48 kHz, frames */
     float strength;                  /* 0 = delayed dry, 1 = full denoise */
-    double max_ppm;                  /* drift correction limit, e.g. 2000 */
+    double max_ppm;                  /* 0 = fixed ratio (shared clock); else drift limit */
 } nv_bridge_config;
 typedef struct nv_bridge_stats {
     uint64_t pushed, pulled, consumed, underruns, overflows, rejected_samples;

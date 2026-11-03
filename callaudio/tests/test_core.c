@@ -295,6 +295,43 @@ static int run_sim(const sim_case *k, sim_result *res) {
     return 0;
 }
 
+/* Equal-rate endpoints in one clock domain have no relative drift. CoreAudio
+ * capture/presentation timestamps may still differ by several IO periods:
+ * feeding that offset into a fill PI loop must not steer their pitch. */
+static void test_shared_clock(int adaptive_mutation) {
+    nv_bridge_config cfg = {48000, 2, 48000, 1, 480, 1200, 0.f, adaptive_mutation ? 2000 : 0};
+    nv_bridge *b = nv_bridge_create(&cfg);
+    CHECK(b != NULL, "shared-clock fixed-ratio bridge allocation");
+    if (!b) return;
+    float in[960], out[480], recording[96000];
+    size_t recorded = 0;
+    for (unsigned block = 0; block < 1200; block++) {
+        for (unsigned i = 0; i < 480; i++) {
+            float x = (float)(0.25 * sin(2 * M_PI * 1000 * (block * 480.0 + i) / 48000));
+            in[2 * i] = in[2 * i + 1] = x;
+        }
+        TRACK(1);
+        nv_bridge_push(b, in, 480, (uint64_t)block * 10000000 + 1);
+        nv_bridge_pull(b, out, 480, (uint64_t)block * 10000000 + 30000001);
+        TRACK(0);
+        if (block >= 1000) { memcpy(recording + recorded, out, sizeof out); recorded += 480; }
+    }
+    nv_bridge_stats st; nv_bridge_get_stats(b, &st);
+    CHECK(st.primed && st.underruns == 0 && st.overflows == 0,
+        "shared-clock continuity: underruns %llu overflows %llu", (unsigned long long)st.underruns, (unsigned long long)st.overflows);
+    CHECK(st.correction_ppm == 0, "shared-clock pitch steered %.3f ppm", st.correction_ppm);
+    double gain = 0, coherence = 0;
+    CHECK(nv_signal_preserved(recording, recorded, 48000, 1000, 0.25 / sqrt(2), &gain, &coherence),
+        "shared-clock carrier lost: gain %.2f coherence %.3f", gain, coherence);
+    unsigned glitches = 0;
+    for (size_t i = 2; i < recorded; i++)
+        if (fabs(recording[i] - 2.0 * recording[i - 1] + recording[i - 2]) > 0.03) glitches++;
+    CHECK(glitches == 0, "shared-clock glitches %u", glitches);
+    fprintf(stderr, "shared_clock correction_ppm=%.3f underruns=%llu gain_db=%.2f coherence=%.3f glitches=%u adaptive_mutation=%d\n",
+        st.correction_ppm, (unsigned long long)st.underruns, gain, coherence, glitches, adaptive_mutation);
+    nv_bridge_destroy(b);
+}
+
 /* Nonstationary signal with denoise fully active; muting must fail this test. */
 static void test_denoise_signal(int mute_output) {
     nv_bridge_config cfg = {48000, 1, 48000, 1, 480, 1440, 1.f, 2000};
@@ -450,6 +487,13 @@ static void test_bridge_threads(unsigned long long *underruns, unsigned long lon
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--shared-clock-only") == 0) {
+        int mutation = argc > 2 && strcmp(argv[2], "--adaptive-shared-clock") == 0;
+        test_shared_clock(mutation);
+        printf("{\"ok\":%s,\"failures\":%d,\"adaptive_mutation\":%s}\n",
+            failures ? "false" : "true", failures, mutation ? "true" : "false");
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--threads-only") == 0) {
         inject_thread_stall = argc > 2 && strcmp(argv[2], "--stall-producer") == 0;
         unsigned long long tu = 0, to = 0;
@@ -462,7 +506,7 @@ int main(int argc, char **argv) {
     }
     int denoise_only = argc > 1 && strcmp(argv[1], "--denoise-only") == 0;
     int mute_output = argc > 2 && strcmp(argv[2], "--mute-denoise-output") == 0;
-    test_endpoint_watch(); test_denoise_signal(mute_output);
+    test_endpoint_watch(); test_shared_clock(0); test_denoise_signal(mute_output);
     if (denoise_only) {
         printf("{\"ok\":%s,\"failures\":%d,\"muted_output\":%s}\n", failures ? "false" : "true", failures, mute_output ? "true" : "false");
         return failures ? 1 : 0;

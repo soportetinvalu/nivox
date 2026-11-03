@@ -114,7 +114,7 @@ nv_bridge *nv_bridge_create(const nv_bridge_config *c) {
     if (!c || c->in_rate < 8000 || c->in_rate > 192000 || c->out_rate < 8000 || c->out_rate > 192000
         || c->in_channels < 1 || c->in_channels > 8 || c->out_channels < 1 || c->out_channels > 8
         || c->max_block < 16 || c->max_block > 8192 || c->target_fill < 64 || c->target_fill > 48000
-        || !(c->strength >= 0 && c->strength <= 1) || !(c->max_ppm > 0 && c->max_ppm <= 20000))
+        || !(c->strength >= 0 && c->strength <= 1) || !(c->max_ppm >= 0 && c->max_ppm <= 20000))
         return NULL;
     nv_bridge *b = calloc(1, sizeof *b);
     if (!b) return NULL;
@@ -129,8 +129,11 @@ nv_bridge *nv_bridge_create(const nv_bridge_config *c) {
     }
     b->rs_cap = (size_t)ceil((double)c->max_block * NV_INTERNAL_RATE / c->in_rate) + 64;
     /* Output resampler: integer fraction so a few-ppm correction is representable. */
-    b->num = ratio_num(c->out_rate, 0);
-    b->out_rs = speex_resampler_init_frac(1, b->num, NV_RATIO_DEN,
+    /* Shared-clock endpoints need an exact, fixed nominal ratio. Their
+     * presentation-time offset is latency, not relative clock drift. */
+    b->num = c->max_ppm > 0 ? ratio_num(c->out_rate, 0) : NV_INTERNAL_RATE;
+    spx_uint32_t initial_den = c->max_ppm > 0 ? NV_RATIO_DEN : c->out_rate;
+    b->out_rs = speex_resampler_init_frac(1, b->num, initial_den,
                                           NV_INTERNAL_RATE, c->out_rate, NV_RS_QUALITY, &err);
     b->peek_cap = (size_t)ceil((double)c->max_block * NV_INTERNAL_RATE / c->out_rate * (1 + c->max_ppm * 1e-6)) + 256;
     size_t fifo_cap = next_pow2(4 * ((size_t)c->target_fill + b->rs_cap + b->peek_cap));
@@ -148,9 +151,9 @@ nv_bridge *nv_bridge_create(const nv_bridge_config *c) {
     /* Pre-size SpeexDSP internal tables for every ratio we may request, so
      * later corrections on the RT thread never reallocate. */
     const spx_uint32_t den = NV_RATIO_DEN;
-    if (speex_resampler_set_rate_frac(b->out_rs, ratio_num(c->out_rate, c->max_ppm * 1e-6), den, NV_INTERNAL_RATE, c->out_rate)
+    if (c->max_ppm > 0 && (speex_resampler_set_rate_frac(b->out_rs, ratio_num(c->out_rate, c->max_ppm * 1e-6), den, NV_INTERNAL_RATE, c->out_rate)
         || speex_resampler_set_rate_frac(b->out_rs, ratio_num(c->out_rate, -c->max_ppm * 1e-6), den, NV_INTERNAL_RATE, c->out_rate)
-        || speex_resampler_set_rate_frac(b->out_rs, b->num, den, NV_INTERNAL_RATE, c->out_rate)) {
+        || speex_resampler_set_rate_frac(b->out_rs, b->num, den, NV_INTERNAL_RATE, c->out_rate))) {
         nv_bridge_destroy(b);
         return NULL;
     }
@@ -271,7 +274,7 @@ static int pull_block(nv_bridge *b, float *dst, uint32_t frames, uint64_t now_ns
         b->primed = 1;
         atomic_store_explicit(&b->primed_flag, 1, memory_order_relaxed);
     }
-    update_ratio(b, (double)avail + inflight, frames);
+    if (b->cfg.max_ppm > 0) update_ratio(b, (double)avail + inflight, frames);
     uint32_t done = 0;
     while (done < frames) {
         size_t got = nv_fifo_peek(b->fifo, b->peek, b->peek_cap);
