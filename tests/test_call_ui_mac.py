@@ -11,6 +11,63 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def verify_matrix(runtime):
+    expected = {(w, h, tab) for w in [780, 1000] for h in [560, 900] for tab in [False, True]}
+    checks = runtime['text_visibility_checks']
+    actual = [(c['viewport_width'], c['viewport_height'], c['tabbed_production_root']) for c in checks]
+    assert len(actual) == len(expected) and set(actual) == expected, actual
+    assert runtime['matrix_expected'] == runtime['matrix_completed'] == len(expected)
+
+
+def collect_diagnostics(run, binary, out, driver, compile_mutant, report):
+    """Failures remain failures, but do not suppress independent counterprobes."""
+    report['failures'] = []
+
+    def attempt(name, action):
+        try:
+            action()
+        except Exception as exc:
+            report['failures'].append({'stage': name, 'error': f'{type(exc).__name__}: {exc}'})
+
+    def positive():
+        proc = run([binary, out, driver], expect=False)
+        runtime = json.loads((out / 'runtime.json').read_text())
+        report['runtime'] = runtime  # Preserve failed/partial reports, too.
+        verify_matrix(runtime)
+        assert proc.returncode == 0 and runtime['ok'] and runtime['phase'] == driver, (
+            f'production matrix failed: rc={proc.returncode}, ok={runtime["ok"]}, phase={runtime["phase"]}')
+        assert all(c['ok'] and c['viewport_preserved'] and not c['failures']
+                   for c in runtime['text_visibility_checks'])
+        assert runtime['opaque_capture_selftests_passed'] and runtime['original_capture_regression_passed']
+
+    def opposite():
+        negative = out / 'counterprobe'
+        negative.mkdir()
+        proc = run([binary, negative, 'present' if driver == 'absent' else 'absent'], expect=False)
+        assert proc.returncode == 1 and 'real HAL driver presence disagrees with phase' in proc.stderr, proc.stderr
+        assert not (negative / 'runtime.json').exists()
+        report['opposite_driver_phase_rejected'] = True
+
+    def truncation():
+        mutant_binary = compile_mutant()
+        truncated = out / 'truncation-counterprobe'
+        truncated.mkdir()
+        proc = run([mutant_binary, truncated, driver], expect=False)
+        assert proc.returncode == 1 and 'significant text not visible' in proc.stderr, proc.stderr
+        failure = json.loads((truncated / 'call-780x560-text.json').read_text())
+        assert not failure['ok'] and failure['missing_spans']
+        assert failure['viewport_preserved'] and failure['visible_scroll_count'] == 1
+        assert failure['failures'] and all(f.startswith('significant text not visible')
+                                           for f in failure['failures']), failure['failures']
+        verify_matrix(json.loads((truncated / 'runtime.json').read_text()))
+        report['real_truncation_rejected'] = True
+
+    attempt('production_matrix', positive)
+    attempt('opposite_driver_phase', opposite)
+    attempt('real_truncation', truncation)
+    report['ok'] = not report['failures']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', required=True, type=Path)
@@ -42,7 +99,16 @@ def main():
     with (out / 'commands.log').open('x') as log:
         def run(command, expect=True):
             command = list(map(str, command))
-            proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
+            try:
+                proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired as exc:
+                # capture_output otherwise hides the last successful viewport.
+                def text(value):
+                    return value.decode(errors='replace') if isinstance(value, bytes) else value or ''
+                log.write(repr(command) + '\n' + text(exc.stdout) + text(exc.stderr) + '\nTIMEOUT\n')
+                log.flush()
+                report['commands'].append({'command': command, 'returncode': None, 'timeout_seconds': 120})
+                raise
             log.write(repr(command) + '\n' + proc.stdout + proc.stderr + '\n')
             log.flush()
             report['commands'].append({'command': command, 'returncode': proc.returncode})
@@ -107,39 +173,25 @@ def main():
                 run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--entitlements', ROOT / 'App/Entitlements.plist', executable])
             # Keep production hardened runtime/audio-input entitlement. No TCC overrides.
             compile_view(ROOT / 'App/CallAudio.swift', binary)
-            run([binary, out, args.driver])
-            runtime = json.loads((out / 'runtime.json').read_text())
-            assert runtime['ok'] and runtime['phase'] == args.driver
-            assert runtime['opaque_capture_selftests_passed'] and runtime['original_capture_regression_passed']
-            # Counterprobe: same binary must specifically reject the opposite HAL phase.
-            negative = out / 'counterprobe'
-            negative.mkdir()
-            proc = run([binary, negative, 'present' if args.driver == 'absent' else 'absent'], expect=False)
-            assert proc.returncode == 1 and 'real HAL driver presence disagrees with phase' in proc.stderr, proc.stderr
-            assert not (negative / 'runtime.json').exists()
-            report.update(opposite_driver_phase_rejected=True, runtime=runtime)
             # Real layout regression, not mocked OCR: rebuild a disposable copy
             # forcing the notices to a single truncated line. Same renderer/oracle.
-            mutant_source = out / 'CallAudio-truncated.swift'
-            view_source = (ROOT / 'App/CallAudio.swift').read_text()
-            marker = '.fixedSize(horizontal: false, vertical: true)'
-            assert view_source.count(marker) >= 7
-            mutant_source.write_text(view_source.replace(marker, '.lineLimit(1)'))
-            mutant_binary = out / 'ui-smoke-truncated'
-            compile_view(mutant_source, mutant_binary)
-            truncated = out / 'truncation-counterprobe'
-            truncated.mkdir()
-            proc = run([mutant_binary, truncated, args.driver], expect=False)
-            assert proc.returncode == 1 and 'significant text not visible' in proc.stderr, proc.stderr
-            failure = json.loads((truncated / 'call-780x560-text.json').read_text())
-            assert not failure['ok'] and failure['missing_spans']
-            report.update(ok=True, real_truncation_rejected=True,
-                          png_sha256={str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
-                                      for p in sorted(out.rglob('*.png'))})
+            def compile_mutant():
+                mutant_source = out / 'CallAudio-truncated.swift'
+                view_source = (ROOT / 'App/CallAudio.swift').read_text()
+                marker = '.fixedSize(horizontal: false, vertical: true)'
+                assert view_source.count(marker) >= 7
+                mutant_source.write_text(view_source.replace(marker, '.lineLimit(1)'))
+                mutant_binary = out / 'ui-smoke-truncated'
+                compile_view(mutant_source, mutant_binary)
+                return mutant_binary
+            collect_diagnostics(run, binary, out, args.driver, compile_mutant, report)
         finally:
+            report['png_sha256'] = {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                    for p in sorted(out.rglob('*.png'))}
             (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report))
+    return 0 if report['ok'] else 1
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

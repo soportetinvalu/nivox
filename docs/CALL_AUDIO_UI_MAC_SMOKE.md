@@ -23,8 +23,9 @@ no a su hijo: la barra de pestañas no consume parte de una altura fija del hijo
 No se encogen fuentes ni se eliminan advertencias para conseguir un verde.
 
 La prueba aloja la vista de llamadas real **y `NivoxContent`, el contenedor de
-pestañas usado por `NivoxApp`**, en ventanas AppKit de 780×560 y 1000×560 puntos.
-También comprueba el contenedor de pestañas a 1000×900. La ventana no puede crecer
+pestañas usado por `NivoxApp`**, en el producto cartesiano de anchos 780/1000 y
+alturas 560/900 puntos: ocho casos por fase HAL, tanto en candidato como en mutante.
+La ventana no puede crecer
 silenciosamente para acomodar el texto. Se recorren posiciones solapadas del
 `NSScrollView` real y se guardan capturas del viewport, no del documento oculto.
 
@@ -150,6 +151,52 @@ real; el muestreo 2× es una corrección candidata que requiere ejecutar Vision
 en la CI Mac. No se declara que haya resuelto el incidente hasta que pasen la
 regresión histórica, todos los viewports y la contraprueba de truncado. Las
 pruebas Linux de control/lifecycle y el parseo Swift no sustituyen esa ejecución.
+
+## Diagnóstico de dimensiones sin cambiar la UI
+
+El run `41707720389`, job `126168271767`, sobre `20bd30e` superó la regresión
+OCR y la vista directa de 780×560; falló en la guarda del contenedor con pestañas
+sin imprimir las dimensiones efectivas. Eso no identifica todavía una causa
+en la UI o en el arnés. No se cambia ningún archivo de `App/`, mínimo, fuente,
+texto, tolerancia de un punto, oráculo OCR ni contraprueba de truncado.
+
+Cada `*-text.json` conserva ahora las medidas numéricas de la ventana creada,
+el contenido adjuntado, el layout estabilizado y cada posición de scroll:
+
+- `window_frame`, `content_rect_for_frame`, `content_layout_rect`, mínimos y máximos
+  de ventana/contenido, escala de respaldo, pantalla y apariencia efectiva.
+- Árbol AppKit con clase, frame, bounds, rectángulo visible, fitting e intrinsic
+  size, constraints, autoresizing y estado oculto; clip y documento del scroll.
+- Dimensiones solicitadas y preservadas, offsets, medidas en píxeles y nombres de
+  PNG crudo/opaco/OCR. Los PNG `*-initial*.png` preceden a la guarda del scroll.
+
+La guarda de dimensiones sigue fallando con las mismas tolerancias; añade las
+medidas al error. Un viewport expandido **nunca** acredita visibilidad al tamaño
+solicitado, aunque su OCR sea completo. Se guardan píxeles diagnósticos, se recogen
+los fallos y se continúan los otros casos. JSON por caso y `runtime.json` se
+actualizan atómicamente durante la matriz; `ok` permanece falso hasta terminar.
+Un fallo de captura/Vision se conserva y no evita intentar el siguiente scroll.
+Las guardas de HAL, selección, audio y TCC no se eliminan ni se simulan.
+
+El runner Python intenta las dos contrapruebas incluso tras fallo/timeout del
+candidato; exige la matriz exacta sin duplicados y conserva hashes PNG también
+cuando falla. Un timeout conserva stdout/stderr parcial y su duración. Esto no
+garantiza completar casos después de un crash, timeout o prerrequisito inválido;
+esos casos no ejecutados no pueden producir un verde.
+
+El workflow intenta instalación/E2E y la fase `present` aunque falle la prueba
+UI `absent`; también intenta `present` si falla E2E/recuperación tras instalar.
+Exige previamente el build, la VM GitHub-hosted efímera y el plug-in instalado,
+y mantiene la comprobación HAL real. No usa `continue-on-error`: cualquier fallo
+original sigue haciendo fallar el job. Desinstalación protegida y upload siguen
+con `always()`. No se añaden esperas, reintentos ni runners de pago.
+
+`python3 tests/test_call_ui_diagnostics.py` comprueba exclusivamente la
+orquestación con registros sintéticos declarados: positivo, fallo de viewport,
+timeout, ausencia de runtime, matriz incompleta/duplicada, conteo inconsistente y
+rechazo de errores no específicos en las contrapruebas. No son evidencia Mac.
+La compilación AppKit/Vision y las medidas reales quedan a cargo del nuevo run;
+el host Linux no tiene `swiftc` y rechaza correctamente la ejecución nativa.
 
 ## Otras aserciones y evidencia
 
