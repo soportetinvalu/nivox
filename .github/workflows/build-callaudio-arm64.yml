@@ -22,6 +22,8 @@ jobs:
         run: python3 callaudio/tests/test_installer.py
       - name: Pinned dependency compatibility regression (no SDK or installation)
         run: python3 callaudio/tests/test_build_compat.py
+      - name: CLI recovery verifier (real Mac stderr and negative probes)
+        run: python3 callaudio/tests/test_cli_recovery.py
       - name: Call controller lifecycle (release, ASan+UBSan, readiness counterprobe)
         run: python3 tests/test_call_audio.py --out build/call-ui-control
       - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)
@@ -108,15 +110,7 @@ jobs:
           sudo killall coreaudiod
           wait "$pid"
           trap - EXIT
-          python3 - "$out/cli-recovery.jsonl" <<'PY'
-          import json, sys
-          events = [json.loads(line) for line in open(sys.argv[1])]
-          assert sum(e.get('event') == 'started' for e in events) >= 2, events
-          assert any(e.get('event') == 'restart' for e in events), events
-          stats = [e for e in events if e.get('event') == 'stats' and e['paths']]
-          assert stats and stats[-1]['paths'][0]['pushed'] > 0 and stats[-1]['paths'][0]['pulled'] > 0, events
-          print(json.dumps({'recovered_after_coreaudiod_restart': True}))
-          PY
+          python3 callaudio/tools/verify_cli_recovery.py "$out/cli-recovery.jsonl" --report "$out/cli-recovery-report.json"
       - name: Protected uninstall (runner only)
         if: always()
         shell: bash
@@ -149,6 +143,7 @@ jobs:
             build/callaudio-mac/e2e-captures/
             build/callaudio-mac/cli-smoke.jsonl
             build/callaudio-mac/cli-recovery.jsonl
+            build/callaudio-mac/cli-recovery-report.json
             build/callaudio-mac/coreaudio.log
             build/callaudio-mac/*.log
             build/callaudio-mac/app-build/report.json

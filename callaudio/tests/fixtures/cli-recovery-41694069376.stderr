@@ -1,0 +1,15 @@
+warning: The VAD has been replaced by a hack pending a complete rewrite
+{"event":"started","path":"speaker","target":1200}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":100800,"pulled":101280,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":190080,"pulled":190080,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"restart","path":"speaker"}
+warning: The VAD has been replaced by a hack pending a complete rewrite
+{"event":"started","path":"speaker","target":1200}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":82560,"pulled":83520,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":195840,"pulled":196800,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":297120,"pulled":298080,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":398400,"pulled":399360,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":506880,"pulled":507360,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":608160,"pulled":609120,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stats","paths":[{"path":"speaker","primed":1,"pushed":710880,"pulled":711360,"underruns":0,"overflows":0,"fill":1176,"target":1200,"correction_ppm":0.0,"in_buffer":480,"out_buffer":480,"nominal_latency_ms":45.5}]}
+{"event":"stopped"}

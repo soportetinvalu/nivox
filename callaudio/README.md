@@ -65,6 +65,17 @@ gh workflow run build-speex-arm64.yml --ref fix/callaudio-safe-ci -f callaudio=t
 
 Los cinco tests del instalador en Linux usan un sandbox y comandos de sistema sustituidos: prueban su transacción, **no** carga HAL ni firma Apple real. Las pruebas del monitor verifican cambios de ID, tasa, canales, buffer y formato físico; el hardware físico y los cambios reales de formato quedan fuera del CI virtual.
 
+Regresión del verificador de recuperación: `python3 callaudio/tests/test_cli_recovery.py`.
+Usa stderr original del run `41694069376`, job `126120695677`, artefacto
+`13262290198`: el motor se reabrió y sus callbacks avanzaron, pero el parser
+anterior falló con `JSONDecodeError` ante la advertencia VAD de SpeexDSP.
+`tools/verify_cli_recovery.py` conserva esa advertencia conocida en el reporte;
+rechaza otras líneas no JSON y exige arranque previo, reinicio, reapertura y
+dos muestras posteriores con ambos contadores crecientes, priming y cero
+underruns/overflows. Las contrapruebas eliminan esos requisitos o congelan los
+contadores y deben fallar. Esto verifica el arnés sobre evidencia Apple histórica;
+no sustituye una ejecución Mac nueva ni demuestra contenido de audio tras reiniciar.
+
 ## Bloqueos y pendientes
 
 1. **Solo cuenta evidencia Apple real**: el host de desarrollo es Linux, sin SDK. Consultar la ejecución manual de la rama y su SHA exacto; sus fallos no se sustituyen por comprobaciones de sintaxis ni stubs.
