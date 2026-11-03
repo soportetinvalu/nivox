@@ -52,6 +52,50 @@ def main():
         try:
             sdk = run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).stdout.strip()
             binary = out / 'ui-smoke'
+            # Compile the actual PNG loader in isolation against AppKit, before
+            # linking the UI. No invented NSBitmapImageRep declaration or stub.
+            smoke = (ROOT / 'ci/CallAudioUISmoke.swift').read_text()
+            start = '    @MainActor static func snapshotFixture(_ fixture: URL) -> CGImage? {\n'
+            assert smoke.count(start) == 1
+            method = start + smoke.split(start, 1)[1].split('\n    }', 1)[0] + '\n    }'
+            assert smoke.count('guard let raw = snapshotFixture(fixture) else {') == 1
+            def fixture_program(loader):
+                return '''import AppKit
+@main struct SnapshotFixtureRegression {
+''' + loader + '''
+    @MainActor static func main() {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let fixture = root.appendingPathComponent("tests/fixtures/call-ui-transparent-41701415863.png")
+        guard let image = snapshotFixture(fixture) else { fatalError("genuine PNG was not decoded") }
+        precondition(image.width == 780 && image.height == 560, "wrong fixture geometry")
+        precondition(image.alphaInfo != .none && image.alphaInfo != .noneSkipLast && image.alphaInfo != .noneSkipFirst,
+                     "genuine fixture lost transparency")
+        precondition(snapshotFixture(fixture.appendingPathComponent("missing.png")) == nil,
+                     "missing fixture was accepted")
+        precondition(snapshotFixture(root.appendingPathComponent("ci/CallAudioUISmoke.swift")) == nil,
+                     "non-image data was accepted")
+        print("snapshot fixture cases passed: 3")
+    }
+}
+'''
+            fixture_source, fixture_binary = out / 'SnapshotFixture.swift', out / 'snapshot-fixture'
+            fixture_source.write_text(fixture_program(method))
+            fixture_flags = ['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library',
+                             '-warnings-as-errors', '-target', 'arm64-apple-macos13.0', '-sdk', sdk]
+            run([*fixture_flags, fixture_source, '-framework', 'AppKit', '-o', fixture_binary])
+            result = run([fixture_binary])
+            assert result.stdout.strip() == 'snapshot fixture cases passed: 3', result.stdout
+            # Reproduce the original API error, not just any compiler failure.
+            original = '''    @MainActor static func snapshotFixture(_ fixture: URL) -> CGImage? {
+        guard let bitmap = NSBitmapImageRep(contentsOf: fixture) else { return nil }
+        return bitmap.cgImage
+    }'''
+            original_source = out / 'SnapshotFixture-original.swift'
+            original_source.write_text(fixture_program(original))
+            rejected = run([*fixture_flags, original_source, '-framework', 'AppKit',
+                            '-o', out / 'snapshot-fixture-original'], expect=False)
+            assert rejected.returncode != 0 and 'argument passed to call that takes no arguments' in rejected.stderr, rejected.stderr
+            report.update(snapshot_fixture_cases_passed=3, original_fixture_initializer_rejected=True)
             def compile_view(view_source, executable):
                 run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '-Onone',
                  '-target', 'arm64-apple-macos13.0', '-sdk', sdk, '-I', ROOT / 'CNoise/include',

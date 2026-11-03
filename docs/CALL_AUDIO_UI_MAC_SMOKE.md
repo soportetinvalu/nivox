@@ -84,6 +84,39 @@ Ninguna de ellas compila Swift/AppKit ni ejecuta Vision. La regresión nativa y
 la visibilidad completa solo quedan acreditadas cuando finalice verde la CI
 Mac del commit corrector; no se atribuye ese resultado a la inspección Linux.
 
+## Incidente de compilación del run 41704538403
+
+El job Mac `126157234647`, sobre `51f763aad21119ad56ac2b1350b5e7fdf7510036`,
+construyó y empaquetó la aplicación, pero no compiló el arnés UI. El diagnóstico
+real se conserva en `ui-mac-absent/commands.log` del artefacto
+`nivox-callaudio-arm64-adhoc-41704538403-1`:
+
+```text
+ci/CallAudioUISmoke.swift:101:57: error: argument passed to call that takes no arguments
+NSBitmapImageRep(contentsOf: fixture)
+```
+
+`NSBitmapImageRep` no ofrece ese inicializador de URL. `snapshotFixture` carga
+los bytes con `Data(contentsOf:)` y los decodifica con `NSBitmapImageRep(data:)`.
+Devuelve `nil` ante un archivo ausente o no decodificable; el oráculo mantiene
+su fallo cerrado. No se modifica el PNG original, la composición ni el OCR.
+
+Antes de compilar la UI completa, el runner extrae ese método **literalmente**
+y lo compila contra AppKit real con warnings como errores. Ejecuta tres casos:
+PNG genuino (780×560 y alpha conservado), ruta inexistente y archivo de texto
+no decodificable. También recompila el inicializador defectuoso original y
+exige específicamente el mismo diagnóstico, no cualquier fallo. El informe
+registra `snapshot_fixture_cases_passed: 3` y
+`original_fixture_initializer_rejected: true` solo cuando ambas pruebas pasan.
+No usa declaraciones AppKit inventadas ni un decoder simulado.
+
+Comprobaciones locales del corrector: `py_compile`, análisis sintáctico con
+Swift 6.2.1 real, regresión de lifecycle Swift/C (14 casos y dos rechazos de
+tipos), control C y contrato HAL simulado en release y ASan+UBSan con sus
+contrapruebas. Linux no dispone de AppKit: **no acredita compilación semántica
+AppKit, ejecución de este nuevo decoder nativo ni visibilidad Mac**. Esos
+resultados siguen pendientes de la nueva CI; no se espera su terminación.
+
 ## Otras aserciones y evidencia
 
 - Se compilan los cuerpos Swift de producción. La única transformación del

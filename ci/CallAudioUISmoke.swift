@@ -94,11 +94,17 @@ import NivoxCallAudio
         catch { require(false, "Vision OCR failed: \(error)") }
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
+    // NSBitmapImageRep decodes bytes; it has no contentsOf: URL initializer.
+    @MainActor static func snapshotFixture(_ fixture: URL) -> CGImage? {
+        guard let data = try? Data(contentsOf: fixture),
+              let bitmap = NSBitmapImageRep(data: data) else { return nil }
+        return bitmap.cgImage
+    }
     @MainActor static func snapshotIncidentRegression(out: URL) {
         // Genuine transparent capture from failed run 41701415863, not a mock.
         let fixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("tests/fixtures/call-ui-transparent-41701415863.png")
-        guard let bitmap = NSBitmapImageRep(contentsOf: fixture), let raw = bitmap.cgImage else {
+        guard let raw = snapshotFixture(fixture) else {
             require(false, "missing original transparent capture fixture"); return
         }
         let expected = [CallAudioCopy.routing, CallAudioCopy.lifecycle,
