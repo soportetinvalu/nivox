@@ -67,6 +67,8 @@ jobs:
         run: |
           [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || { echo 'BLOQUEADO: Darwin arm64 required'; exit 1; }
           python3 callaudio/tools/build_callaudio.py --target mac --out build/callaudio-mac
+      - name: Production SwiftUI render and real HAL safe-state checks (driver absent, no TCC grant)
+        run: python3 tests/test_call_ui_mac.py --build build/callaudio-mac --out build/ui-mac-absent --driver absent
       - name: E2E on the ephemeral runner (installs the plug-in on the CI VM only)
         shell: bash
         run: |
@@ -111,6 +113,8 @@ jobs:
           wait "$pid"
           trap - EXIT
           python3 callaudio/tools/verify_cli_recovery.py "$out/cli-recovery.jsonl" --report "$out/cli-recovery-report.json"
+      - name: Production SwiftUI render and real HAL safe-state checks (driver installed, no physical capture)
+        run: python3 tests/test_call_ui_mac.py --build build/callaudio-mac --out build/ui-mac-present --driver present
       - name: Protected uninstall (runner only)
         if: always()
         shell: bash
@@ -150,5 +154,7 @@ jobs:
             build/callaudio-mac/app-build/commands.log
             build/lifecycle-swift-mac/report.json
             build/lifecycle-swift-mac/commands.log
+            build/ui-mac-absent/
+            build/ui-mac-present/
           if-no-files-found: warn
           retention-days: 7
