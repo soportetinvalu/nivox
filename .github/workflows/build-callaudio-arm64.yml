@@ -88,7 +88,8 @@ jobs:
             sleep 1
           done
           [[ "$found" == "1" ]] || { echo 'driver not loaded by coreaudiod'; cat "$out/devices.json" || true; exit 1; }
-          rc=0; "$out/nv-e2e" > "$out/e2e.json" || rc=$?
+          mkdir "$out/e2e-captures"
+          rc=0; NV_E2E_DIAGNOSTICS="$out/e2e-captures" "$out/nv-e2e" > "$out/e2e.json" || rc=$?
           cat "$out/e2e.json"
           [[ "$rc" == "0" ]] || { echo "nv-e2e failed ($rc)"; exit 1; }
           rc=0; "$out/nivox-callaudio" --no-mic --out-uid nivox.mic-feed.v1 --seconds 4 2> "$out/cli-smoke.jsonl" || rc=$?
@@ -145,6 +146,7 @@ jobs:
             build/callaudio-mac/SHA256SUMS
             build/callaudio-mac/devices.json
             build/callaudio-mac/e2e.json
+            build/callaudio-mac/e2e-captures/
             build/callaudio-mac/cli-smoke.jsonl
             build/callaudio-mac/cli-recovery.jsonl
             build/callaudio-mac/coreaudio.log

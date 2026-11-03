@@ -34,10 +34,20 @@ enum { GEN_SINE, GEN_NOISE, GEN_IMPULSE, GEN_SIGNAL };
 typedef struct {
     int mode; double rate; double phase; float amp; uint32_t seed;
     uint64_t frames, impulse_after; _Atomic uint64_t impulse_ns; int impulse_done;
+    double next_sample_time;
+    uint64_t timestamp_jumps, callbacks;
+    double max_timestamp_jump;
 } gen_t;
 
 static void gen_cb(void *ctx, float *d, uint32_t n, uint32_t ch, const AudioTimeStamp *ts) {
     gen_t *g = ctx;
+    if (ts && (ts->mFlags & kAudioTimeStampSampleTimeValid)) {
+        double jump = g->callbacks ? ts->mSampleTime - g->next_sample_time : 0;
+        if (fabs(jump) > 0.5) g->timestamp_jumps++;
+        if (fabs(jump) > g->max_timestamp_jump) g->max_timestamp_jump = fabs(jump);
+        g->next_sample_time = ts->mSampleTime + n;
+    }
+    g->callbacks++;
     for (uint32_t i = 0; i < n; i++) {
         float x = 0;
         if (g->mode == GEN_SINE) { x = g->amp * (float)sin(g->phase); g->phase += 2 * M_PI * 1000.0 / g->rate; if (g->phase > 2 * M_PI) g->phase -= 2 * M_PI; }
@@ -59,6 +69,8 @@ static void gen_cb(void *ctx, float *d, uint32_t n, uint32_t ch, const AudioTime
 typedef struct {
     float *buf; size_t cap, len; double rate;
     uint64_t *cb_ns; size_t *cb_idx; size_t ncb, cbcap;
+    double *cb_sample_time;
+    uint32_t *cb_frames, *cb_flags;
     uint64_t channel_mismatch;
 } rec_t;
 
@@ -66,6 +78,9 @@ static void rec_cb(void *ctx, float *d, uint32_t n, uint32_t ch, const AudioTime
     rec_t *r = ctx;
     if (r->ncb < r->cbcap) {
         r->cb_ns[r->ncb] = (ts && (ts->mFlags & kAudioTimeStampHostTimeValid)) ? nv_host_to_ns(ts->mHostTime) : 0;
+        r->cb_sample_time[r->ncb] = ts ? ts->mSampleTime : 0;
+        r->cb_frames[r->ncb] = n;
+        r->cb_flags[r->ncb] = ts ? ts->mFlags : 0;
         r->cb_idx[r->ncb++] = r->len;
     }
     for (uint32_t i = 0; i < n && r->len < r->cap; i++) {
@@ -78,9 +93,19 @@ static int rec_init(rec_t *r, double seconds, double rate) {
     memset(r, 0, sizeof *r);
     r->rate = rate; r->cap = (size_t)(seconds * rate) + 8192; r->cbcap = 100000;
     r->buf = calloc(r->cap, sizeof(float)); r->cb_ns = calloc(r->cbcap, 8); r->cb_idx = calloc(r->cbcap, sizeof(size_t));
-    return r->buf && r->cb_ns && r->cb_idx ? 0 : -1;
+    r->cb_sample_time = calloc(r->cbcap, sizeof *r->cb_sample_time);
+    r->cb_frames = calloc(r->cbcap, sizeof *r->cb_frames);
+    r->cb_flags = calloc(r->cbcap, sizeof *r->cb_flags);
+    if (!r->buf || !r->cb_ns || !r->cb_idx || !r->cb_sample_time || !r->cb_frames || !r->cb_flags) {
+        fputs("E2E capture allocation failed\n", stderr);
+        exit(1);
+    }
+    return 0;
 }
-static void rec_free(rec_t *r) { free(r->buf); free(r->cb_ns); free(r->cb_idx); }
+static void rec_free(rec_t *r) {
+    free(r->buf); free(r->cb_ns); free(r->cb_idx);
+    free(r->cb_sample_time); free(r->cb_frames); free(r->cb_flags);
+}
 static uint64_t rec_time_of(const rec_t *r, size_t idx) {
     for (size_t k = r->ncb; k-- > 0;)
         if (r->cb_idx[k] <= idx) return r->cb_ns[k] + (uint64_t)((idx - r->cb_idx[k]) * 1e9 / r->rate);
@@ -107,6 +132,41 @@ static analysis analyze(const rec_t *r, float glitch_thr) {
     return a;
 }
 
+/* Optional diagnostic evidence is written only AFTER both IO threads stop.
+ * Preserve the original signal and strict assertions: do not filter gaps,
+ * concatenate "good" segments or retry until a green capture appears. */
+static void dump_capture(const rec_t *r, const gen_t *g) {
+    const char *dir = getenv("NV_E2E_DIAGNOSTICS");
+    static unsigned sequence;
+    if (!dir || !*dir) return;
+    char path[4096];
+    unsigned id = ++sequence;
+    snprintf(path, sizeof path, "%s/capture-%02u.f32", dir, id);
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); failures++; return; }
+    size_t written = fwrite(r->buf, sizeof *r->buf, r->len, f);
+    int closed = fclose(f);
+    if (written != r->len || closed) failures++;
+    snprintf(path, sizeof path, "%s/capture-%02u.csv", dir, id);
+    f = fopen(path, "w");
+    if (!f) { perror(path); failures++; return; }
+    fputs("index,host_ns,sample_time,frames,flags\n", f);
+    for (size_t k = 0; k < r->ncb; k++)
+        fprintf(f, "%zu,%llu,%.9f,%u,%u\n", r->cb_idx[k],
+                (unsigned long long)r->cb_ns[k], r->cb_sample_time[k], r->cb_frames[k], r->cb_flags[k]);
+    if (fclose(f)) failures++;
+    snprintf(path, sizeof path, "%s/capture-%02u.json", dir, id);
+    f = fopen(path, "w");
+    if (!f) { perror(path); failures++; return; }
+    fprintf(f, "{\"mode\":%d,\"rate\":%.0f,\"recorded\":%zu,\"generated\":%llu,"
+               "\"generator_callbacks\":%llu,\"generator_timestamp_jumps\":%llu,"
+               "\"generator_max_timestamp_jump\":%.3f,\"capture_callbacks\":%zu}\n",
+            g->mode, r->rate, r->len, (unsigned long long)g->frames,
+            (unsigned long long)g->callbacks, (unsigned long long)g->timestamp_jumps,
+            g->max_timestamp_jump, r->ncb);
+    if (fclose(f)) failures++;
+}
+
 /* Play gen into `play`, record `cap` for `seconds`. Optional engine path runs meanwhile. */
 static int run(AudioObjectID play, uint32_t play_ch, gen_t *g, AudioObjectID cap, uint32_t cap_ch,
                rec_t *r, double seconds) {
@@ -120,6 +180,7 @@ static int run(AudioObjectID play, uint32_t play_ch, gen_t *g, AudioObjectID cap
     usleep((useconds_t)(seconds * 1e6));
     nv_io_close(out);
     nv_io_close(in);
+    dump_capture(r, g);
     return 0;
 }
 
