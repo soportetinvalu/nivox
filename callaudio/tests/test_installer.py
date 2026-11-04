@@ -54,6 +54,16 @@ def hashes(bundle):
 
 
 class InstallerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        (ROOT / 'build').mkdir(exist_ok=True)
+        cls.clock_tmp = tempfile.TemporaryDirectory(prefix='installer-clock-', dir=ROOT / 'build')
+        cls.clock_binary = probe_tests.compile_probe(Path(cls.clock_tmp.name) / 'hal', PROBE_SOURCE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.clock_tmp.cleanup()
+
     def setUp(self):
         (ROOT / 'build').mkdir(exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(prefix='installer-test-', dir=ROOT / 'build')
@@ -84,6 +94,16 @@ n=$((n+1)); printf '%s' "$n" > "$STATE/count"
 [ "$n" != "${FAIL_VERIFY:-0}" ]''',
         }
         text = SCRIPT.read_text().replace('/Library', str(self.library))
+        # Explicit clock seam for fast transaction-only tests. Timing tests use
+        # the actual production C CLOCK_MONOTONIC mode, never a wall-time fake.
+        text = text.replace('"$probe" --monotonic-ms', '"$STATE/clock" --monotonic-ms')
+        self.clock = self.base / 'clock'
+        self.clock.write_text('''#!/bin/bash
+n=0; [ ! -e "$STATE/ticks" ] || n=$(cat "$STATE/ticks")
+n=$((n+1000)); echo "$n" > "$STATE/ticks"; echo "$n"
+''')
+        self.clock.chmod(0o755)
+        self.clock_scope = 'synthetic ticks for transaction-only test'
         # Only the disposable sandbox gains a PATH override.
         text = text.replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin',
                             'export PATH=' + str(self.bin) + ':/usr/bin:/bin')
@@ -118,6 +138,7 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
     def record(self, p, args, elapsed_seconds=None):
         RECORDS.append(dict(test=self.id(), args=list(map(str, args)), rc=p.returncode,
                             elapsed_seconds=elapsed_seconds,
+                            clock_scope=self.clock_scope,
                             budgets=(self.base / 'budgets').read_text().splitlines() if (self.base / 'budgets').exists() else [],
                             stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
                             lock=(self.hal / '.NivoxAudio.lock').exists(),
@@ -411,9 +432,13 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
 
     def shorten_phase_budget(self, seconds):
         text = self.script.read_text()
-        self.assertIn('deadline=$((SECONDS+40))', text)
-        text = text.replace('allowance=40', f'allowance={seconds}')
-        self.script.write_text(text.replace('deadline=$((SECONDS+40))', f'deadline=$((SECONDS+{seconds}))'))
+        self.assertIn('deadline=$((now+40000))', text)
+        self.script.write_text(text.replace('deadline=$((now+40000))', f'deadline=$((now+{seconds * 1000}))'))
+        self.use_real_clock()
+
+    def use_real_clock(self):
+        shutil.copyfile(self.clock_binary, self.clock)
+        self.clock_scope = 'production C CLOCK_MONOTONIC, synthetic HAL headers'
 
     def communicate_bounded(self, p, args, start, limit):
         try:
@@ -429,10 +454,208 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
                            args, time.monotonic() - start)
 
     def use_c_probe(self):
+        self.use_real_clock()
         binary = probe_tests.compile_probe(self.base / 'synthetic-hal', PROBE_SOURCE)
         shutil.copyfile(binary, self.helper)
         self.helper.chmod(0o755)
         self.env.update(SCENARIO='service-hang', HAL_HANG_MARKER=str(self.base / 'c-hal-ready'))
+
+    def test_clock_and_hal_use_same_transaction_owned_c_helper(self):
+        self.use_c_probe()
+        self.env['SCENARIO'] = 'present'
+        self.script.write_text(self.script.read_text().replace(
+            '"$STATE/clock" --monotonic-ms', '"$probe" --monotonic-ms'))
+        p = self.run_manager('install', self.src)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(hashes(self.dst), hashes(self.src))
+        self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+
+    def test_missing_or_invalid_monotonic_clock_fails_before_bundle_mutation(self):
+        self.installed()
+        original = hashes(self.dst)
+        for output in ['', 'no-clock', '-1', '1234567890123456', '1;exit 0']:
+            with self.subTest(output=output):
+                self.clock.write_text('#!/bin/bash\nprintf "%s\\n" ' + repr(output) + '\n')
+                p = self.run_manager('uninstall')
+                self.assert_failed(p)
+                self.assertEqual(p.returncode, 2)
+                self.assertEqual(hashes(self.dst), original)
+                self.assertFalse((self.base / 'restarts').exists())
+                self.assertIn('Cannot read monotonic clock', p.stderr)
+
+    def real_polling_fixture(self, delay, recovery=False, slow_failure: float = 0, transients=False):
+        self.use_real_clock()
+        (self.bin / 'sleep').write_text('#!/bin/bash\nexec /bin/sleep "$@"\n')
+        # A real per-phase epoch is recorded by the synthetic daemon restart.
+        (self.bin / 'killall').write_text(f'''#!{sys.executable}
+import os, time
+from pathlib import Path
+s = Path(os.environ['STATE'])
+n = int((s / 'restarts').read_text()) + 1 if (s / 'restarts').exists() else 1
+(s / 'restarts').write_text(str(n))
+(s / 'phase-start').write_text(str(time.monotonic()))
+raise SystemExit(7 if {recovery!r} and n == 1 else 0)
+''')
+        # Readiness uses production C UID decisions; injected slow RC1/2/124
+        # represent retryable failures, not a claim of running coreaudiod.
+        self.helper.write_text(f'''#!{sys.executable}
+import os, sys, time
+from pathlib import Path
+s = Path(os.environ['STATE'])
+elapsed = time.monotonic() - float((s / 'phase-start').read_text())
+expected = sys.argv[1]
+with (s / 'probes').open('a') as f: f.write(expected + '\\n')
+with (s / 'budgets').open('a') as f: f.write(sys.argv[2] + '\\n')
+with (s / 'poll-events').open('a') as f: f.write(str(elapsed) + ' ' + expected + '\\n')
+if elapsed < {delay!r}:
+    if {slow_failure!r}:
+        budget = int(sys.argv[2][:-2]) / 1000 if sys.argv[2].endswith('ms') else int(sys.argv[2])
+        time.sleep(min({slow_failure!r}, budget))
+        count = len((s / 'probes').read_text().splitlines())
+        rc = [1, 2, 124][count % 3] if {transients!r} else 1
+        with (s / 'injected-rc').open('a') as f: f.write(str(rc) + '\\n')
+        raise SystemExit(rc)
+    scenario = 'absent' if expected == 'present' else 'present'
+else:
+    scenario = expected
+os.execve({str(self.clock_binary)!r}, [{str(self.clock_binary)!r}, *sys.argv[1:]],
+          dict(os.environ, SCENARIO=scenario))
+''')
+
+    def check_delayed_publication(self, delay, recovery):
+        if recovery:
+            self.installed()
+            original = hashes(self.dst)
+        else:
+            original = hashes(self.src)
+        self.real_polling_fixture(delay, recovery=recovery)
+        args = ['uninstall'] if recovery else ['install', self.src]
+        start = time.monotonic()
+        p = subprocess.Popen([BASH, str(self.script), *map(str, args)], env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        result = self.communicate_bounded(p, [*args, 'publication-after', delay], start, delay + 5)
+        RECORDS[-1]['poll_events'] = (self.base / 'poll-events').read_text().splitlines()
+        self.assertGreaterEqual(RECORDS[-1]['elapsed_seconds'], delay)
+        self.assertLess(RECORDS[-1]['elapsed_seconds'], delay + 3)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+        if recovery:
+            self.assert_failed(result)
+            self.assertEqual(result.returncode, 7)
+            self.assertIn('state restored', result.stderr)
+            self.assertNotIn('RECOVERY UNVERIFIED', result.stderr)
+            self.assertEqual([hashes(b) for b in self.previous()], [original])
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('HAL presence verified (present)', result.stdout)
+
+    def test_publication_after_8_seconds_in_main_phase(self):
+        self.check_delayed_publication(8, False)
+
+    def test_publication_after_10_seconds_in_main_phase(self):
+        self.check_delayed_publication(10, False)
+
+    def test_publication_after_8_seconds_in_recovery(self):
+        self.check_delayed_publication(8, True)
+
+    def test_publication_after_10_seconds_in_recovery(self):
+        self.check_delayed_publication(10, True)
+
+    def test_publication_after_38_seconds_keeps_nearly_full_window(self):
+        self.check_delayed_publication(38, False)
+
+    def wall_environment(self, mode):
+        shim = self.base / 'wall.c'
+        shim.write_text(CLOCK_SHIM)
+        library = self.base / 'wall.so'
+        cc = shutil.which('clang') or shutil.which('cc')
+        self.assertIsNotNone(cc, 'C compiler required for wall-clock fixture')
+        assert cc is not None
+        subprocess.run([cc, '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
+                        str(shim), '-o', str(library)], check=True, capture_output=True, text=True)
+        env = dict(self.env, LD_PRELOAD=str(library), WALL_MODE=mode)
+        sample = subprocess.run([BASH, '-c',
+            'printf "%s\\n" "$SECONDS"; /bin/sleep 1.1; printf "%s\\n" "$SECONDS"'],
+            env=env, text=True, capture_output=True, check=True, timeout=3)
+        values = list(map(int, sample.stdout.splitlines()))
+        self.assertEqual(values[0], 0)
+        self.assertEqual(values[1], 0) if mode == 'frozen' else self.assertLess(values[1], 0)
+        return env, values
+
+    def check_wall_slow_failures(self, mode, seconds):
+        self.installed()
+        original = hashes(self.dst)
+        if seconds != 40:
+            self.shorten_phase_budget(seconds)
+        self.real_polling_fixture(1000, slow_failure=0.35)
+        env, samples = self.wall_environment(mode)
+        start = time.monotonic()
+        p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        result = self.communicate_bounded(p, ['uninstall', mode, 'slow-RC1', seconds], start, seconds * 2 + 4)
+        RECORDS[-1]['wall_seconds_samples'] = samples
+        RECORDS[-1]['injected_rc'] = (self.base / 'injected-rc').read_text().splitlines()
+        self.assert_failed(result)
+        self.assertGreaterEqual(RECORDS[-1]['elapsed_seconds'], seconds * 2)
+        self.assertLess(RECORDS[-1]['elapsed_seconds'], seconds * 2 + 3)
+        self.assertEqual(set(RECORDS[-1]['injected_rc']), {'1'})
+        self.assertEqual(hashes(self.dst), original)
+        self.assertEqual([hashes(b) for b in self.previous()], [original])
+        self.assertIn('RECOVERY UNVERIFIED', result.stderr)
+        self.assertNotIn('state restored', result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_frozen_wall_clock_slow_failures_have_bounded_main_and_recovery(self):
+        self.check_wall_slow_failures('frozen', 3)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_backward_wall_clock_slow_failures_have_bounded_main_and_recovery(self):
+        self.check_wall_slow_failures('backward', 3)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_full_40_second_frozen_wall_slow_failures_in_both_phases(self):
+        self.check_wall_slow_failures('frozen', 40)
+
+    def check_wall_transients(self, mode, recovery):
+        if recovery:
+            self.installed()
+        original = hashes(self.dst) if recovery else hashes(self.src)
+        self.real_polling_fixture(4.5, recovery=recovery, slow_failure=0.35, transients=True)
+        env, samples = self.wall_environment(mode)
+        args = ['uninstall'] if recovery else ['install', self.src]
+        start = time.monotonic()
+        p = subprocess.Popen([BASH, str(self.script), *map(str, args)], env=env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        result = self.communicate_bounded(p, [*args, mode, 'transient-RC1-2-124'], start, 10)
+        RECORDS[-1]['wall_seconds_samples'] = samples
+        RECORDS[-1]['injected_rc'] = (self.base / 'injected-rc').read_text().splitlines()
+        self.assertEqual(set(RECORDS[-1]['injected_rc']), {'1', '2', '124'})
+        self.assertGreaterEqual(RECORDS[-1]['elapsed_seconds'], 4.5)
+        self.assertLess(RECORDS[-1]['elapsed_seconds'], 8)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+        if recovery:
+            self.assert_failed(result)
+            self.assertIn('state restored', result.stderr)
+            self.assertNotIn('RECOVERY UNVERIFIED', result.stderr)
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_frozen_wall_clock_transients_eventually_verify_main(self):
+        self.check_wall_transients('frozen', False)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_frozen_wall_clock_transients_eventually_verify_recovery(self):
+        self.check_wall_transients('frozen', True)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_backward_wall_clock_transients_eventually_verify_main(self):
+        self.check_wall_transients('backward', False)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_backward_wall_clock_transients_eventually_verify_recovery(self):
+        self.check_wall_transients('backward', True)
 
     def test_inherited_blocked_alarm_recovers_and_unlocks_with_real_c_probe(self):
         self.installed()
@@ -489,7 +712,7 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
         library = self.base / 'wall.so'
         subprocess.run([cc, '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
                         str(shim), '-o', str(library)], check=True, capture_output=True, text=True)
-        self.shorten_phase_budget(7)  # [5, 1] + one real sleep = 7 seconds per phase.
+        self.shorten_phase_budget(7)
         self.blocking_timeout_helper(recovery_also=True)
         (self.bin / 'sleep').write_text('#!/bin/bash\nexec /bin/sleep "$@"\n')
         for mode in ['frozen', 'backward']:
@@ -517,7 +740,9 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
                 self.assert_failed(result)
                 self.assertGreaterEqual(RECORDS[-1]['elapsed_seconds'], 14)
                 self.assertLess(RECORDS[-1]['elapsed_seconds'], 17)
-                self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['5', '1'] * 2)
+                budgets = [int(b.removesuffix('ms')) for b in (self.base / 'budgets').read_text().splitlines()]
+                self.assertEqual(len(budgets), 4)
+                self.assertTrue(all(4800 <= budgets[i] <= 5000 and 700 <= budgets[i+1] <= 1000 for i in [0, 2]), budgets)
                 self.assertEqual(hashes(self.dst), original)
                 self.assertEqual((self.base / 'restarts').read_text(), '2')
                 self.assertIn('RECOVERY UNVERIFIED', result.stderr)
@@ -571,6 +796,7 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
         self.check_transient_timeout_broken_stderr(True)
 
     def blocking_timeout_helper(self, recovery_also=False):
+        self.use_real_clock()
         # Real alarm/exit124 consumes the budget received from the actual shell.
         self.helper.write_text(f'''#!{sys.executable}
 import os, signal, sys
@@ -580,7 +806,7 @@ with (state / 'probes').open('a') as log: log.write(sys.argv[1] + '\\n')
 with (state / 'budgets').open('a') as log: log.write(sys.argv[2] + '\\n')
 if {recovery_also!r} or (state / 'restarts').read_text() == '1':
     signal.signal(signal.SIGALRM, lambda *_: sys.exit(124))
-    signal.alarm(int(sys.argv[2]))
+    signal.setitimer(signal.ITIMER_REAL, int(sys.argv[2].removesuffix('ms')) / 1000)
     while True: signal.pause()
 ''')
 
@@ -596,7 +822,8 @@ if {recovery_also!r} or (state / 'restarts').read_text() == '1':
         self.assertGreaterEqual(elapsed, 2)
         self.assertLess(elapsed, 5)
         self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
-        self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['3', '3'])
+        budgets = [int(b.removesuffix('ms')) for b in (self.base / 'budgets').read_text().splitlines()]
+        self.assertTrue(len(budgets) == 2 and all(2800 <= b <= 3000 for b in budgets), budgets)
         self.assertEqual(hashes(self.dst), original)
         self.assertEqual([hashes(b) for b in self.previous()], [original])
         self.assertIn('state restored', p.stderr)
@@ -613,7 +840,8 @@ if {recovery_also!r} or (state / 'restarts').read_text() == '1':
         self.assertGreaterEqual(elapsed, 3)
         self.assertLess(elapsed, 6)
         self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
-        self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['2', '2'])
+        budgets = [int(b.removesuffix('ms')) for b in (self.base / 'budgets').read_text().splitlines()]
+        self.assertTrue(len(budgets) == 2 and all(1800 <= b <= 2000 for b in budgets), budgets)
         self.assertEqual(hashes(self.dst), original)
         self.assertIn('RECOVERY UNVERIFIED', p.stderr)
         self.assertNotIn('state restored', p.stderr)
@@ -633,10 +861,10 @@ if {recovery_also!r} or (state / 'restarts').read_text() == '1':
         self.assert_failed(p)
         self.assertGreaterEqual(elapsed, 39)
         self.assertLess(elapsed, 42)
-        budgets = list(map(int, (self.base / 'budgets').read_text().splitlines()))
-        self.assertTrue(all(1 <= b <= 5 for b in budgets))
-        self.assertEqual(budgets[0], 5)
-        self.assertTrue(any(b < 5 for b in budgets[:-1]), budgets)
+        budgets = [int(b.removesuffix('ms')) for b in (self.base / 'budgets').read_text().splitlines()]
+        self.assertTrue(all(1 <= b <= 5000 for b in budgets))
+        self.assertEqual(budgets[0], 5000)
+        self.assertTrue(any(b < 5000 for b in budgets[:-1]), budgets)
         self.assertEqual(hashes(self.dst), original)
         self.assertIn('state restored', p.stderr)
 
@@ -669,9 +897,7 @@ exit 0
 
     def test_elapsed_poll_budget_is_not_just_an_attempt_count(self):
         # Shorten only the sandbox budget, never add an environment override.
-        text = self.script.read_text()
-        self.assertIn('deadline=$((SECONDS+40))', text)
-        self.script.write_text(text.replace('deadline=$((SECONDS+40))', 'deadline=$((SECONDS+1))'))
+        self.shorten_phase_budget(1)
         self.installed()
         self.helper.write_text('''#!/bin/bash
 printf '%s\\n' "$1" >> "$STATE/probes"

@@ -173,7 +173,8 @@ class DriverStateTests(unittest.TestCase):
         self.assertEqual(self.probe('anything', 'present'), 2)
 
     def test_remaining_budget_is_bounded_and_cannot_disable_alarm(self):
-        for budget in ['', '0', '-1', '6', '40', '01', '1x']:
+        for budget in ['', '0', '-1', '6', '40', '01', '1x', '0ms', '5001ms',
+                       '10000ms', '-1ms', '01ms', '1.5ms', ' 1ms', '1msx']:
             with self.subTest(budget=budget):
                 p = self.run_probe('absent', 'service-hang', 3, budget=budget)
                 self.assertEqual(p.returncode, 2, p.stderr)
@@ -184,6 +185,26 @@ class DriverStateTests(unittest.TestCase):
                 self.assertEqual(p.returncode, 124, p.stderr)
                 self.assertGreaterEqual(time.monotonic() - start, 0.9)
                 self.assertLess(time.monotonic() - start, 3)
+
+    def test_monotonic_mode_never_enters_hal_and_tracks_elapsed_time(self):
+        before = time.monotonic()
+        first = self.run_probe('--monotonic-ms', 'service-hang', 1)
+        time.sleep(0.15)
+        last = self.run_probe('--monotonic-ms', 'service-hang', 1)
+        self.assertEqual((first.returncode, last.returncode), (0, 0))
+        self.assertRegex(first.stdout, r'^[0-9]+\n$')
+        self.assertRegex(last.stdout, r'^[0-9]+\n$')
+        self.assertGreaterEqual(int(last.stdout) - int(first.stdout), 140)
+        self.assertLessEqual(int(last.stdout) - int(first.stdout), (time.monotonic() - before) * 1000 + 2)
+
+    def test_millisecond_watchdog_with_inherited_blocked_alarm(self):
+        for budget in ['1ms', '125ms', '999ms']:
+            for via_bash in [False, True]:
+                with self.subTest(budget=budget, via_bash=via_bash):
+                    p = self.run_probe('present', 'service-hang', 2, budget=budget,
+                                       inherited='blocked-ignored', via_bash=via_bash)
+                    self.assertEqual(p.returncode, 124, p.stderr)
+                    self.assertLess(RECORDS[-1]['elapsed'], int(budget[:-2]) / 1000 + 0.7)
 
     def test_blocked_hal_calls_have_real_process_deadline(self):
         # Execute the production C, including its default five-second alarm.

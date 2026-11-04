@@ -10,6 +10,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <time.h>
+#include <inttypes.h>
+#include <sys/time.h>
 
 static void deadline_exceeded(int signal_number) {
     (void)signal_number;
@@ -52,14 +55,30 @@ static int lookup(const char *uid, AudioObjectID *device) {
     return 0;
 }
 
+static unsigned budget_ms(const char *s) {
+    size_t n = strlen(s);
+    if (n == 1 && s[0] >= '1' && s[0] <= '5') return (unsigned)(s[0] - '0') * 1000;
+    if (n < 3 || n > 6 || strcmp(s + n - 2, "ms") || s[0] < '1' || s[0] > '9') return 0;
+    unsigned value = 0;
+    for (size_t i = 0; i < n - 2; ++i) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        value = value * 10 + (unsigned)(s[i] - '0');
+    }
+    return value <= 5000 ? value : 0;
+}
+
 int main(int argc, char **argv) {
-    unsigned budget = 5;
+    if (argc == 2 && !strcmp(argv[1], "--monotonic-ms")) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) || now.tv_sec < 0) return 2;
+        return printf("%" PRIu64 "\n", (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000) < 0 ? 2 : 0;
+    }
+    unsigned budget = 5000;
     if ((argc != 2 && argc != 3) || (strcmp(argv[1], "present") && strcmp(argv[1], "absent")) ||
-        (argc == 3 && (strlen(argv[2]) != 1 || argv[2][0] < '1' || argv[2][0] > '5'))) {
-        fprintf(stderr, "Usage: nv-driver-state present|absent [deadline-seconds:1..5]\n");
+        (argc == 3 && !(budget = budget_ms(argv[2])))) {
+        fprintf(stderr, "Usage: nv-driver-state --monotonic-ms | present|absent [1..5 seconds or 1..5000ms]\n");
         return 2;
     }
-    if (argc == 3) budget = (unsigned)(argv[2][0] - '0');
     struct sigaction action = {0};
     sigset_t alarm_set;
     action.sa_handler = deadline_exceeded;
@@ -68,7 +87,12 @@ int main(int argc, char **argv) {
         sigaction(SIGALRM, &action, NULL) ||
         sigprocmask(SIG_UNBLOCK, &alarm_set, NULL)) return 2;
     /* exec preserves a blocked signal mask: resetting SIG_IGN alone is not enough. */
-    alarm(budget); /* Before any HAL call; never longer than the phase remainder. */
+    /* Millisecond remainder: no rounding down the useful polling window or up
+     * the final HAL watchdog. A zero timer is never accepted (it disables it). */
+    struct itimerval timer = {0};
+    timer.it_value.tv_sec = budget / 1000;
+    timer.it_value.tv_usec = (budget % 1000) * 1000;
+    if (setitimer(ITIMER_REAL, &timer, NULL)) return 2;
     int present = !strcmp(argv[1], "present");
     AudioObjectPropertyAddress a = address(kAudioHardwarePropertyDevices);
     UInt32 size = 0;

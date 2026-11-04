@@ -46,35 +46,32 @@ no se anticipa ni dispensa los fallos anteriores.
   ni solicitud TCC. Debe viajar firmado en el paquete completo; no mezclar esta
   fuente con una sonda histórica. Se rechaza helper symlink/cuarentena y se copia
   a una transacción root-only con permisos restringidos antes de usarlo.
-- La sonda arma una alarma **antes de cualquier llamada HAL**: por defecto 5 s,
-  o un argumento explícito entero `1..5` que nunca permite desactivarla/ampliarla.
-  Instala `sigaction` y desbloquea explícitamente SIGALRM con `sigprocmask`:
-  `exec` conserva la máscara bloqueada heredada, aunque se sustituya SIG_IGN.
-  Si falla preparar la señal, sale RC2 antes de HAL. El gestor pasa
-  `min(5, deadline-SECONDS, allowance)`. El manejador usa solo
-  `write`/`_exit(124)`, incluso con una consulta IPC bloqueada. RC124 es un fallo
-  reintentable solo dentro del plazo de la fase; nunca acredita presencia/ausencia.
-  No depende de una utilidad `timeout` ausente en macOS.
-- El polling combina el plazo de pared de 40 s (`SECONDS`) con un **saldo
-  conservador de 40 s independiente del reloj**. Antes de cada consulta descuenta
-  todo el presupuesto solicitado (aunque termine pronto) y antes de cada pausa
-  descuenta 1 s. Nunca repone ese saldo. La suma de alarmas solicitadas + pausas
-  no supera 40 s por fase incluso con reloj congelado/en retroceso; en ese caso,
-  con consultas bloqueadas se obtienen `[5,5,5,5,5,5,4]` y seis pausas de 1 s.
-  Sigue el máximo secundario de 40 consultas, sin reiniciar el plazo al reintentar.
-  Esta política puede agotar antes los reintentos si las consultas fallan rápido:
-  se prefiere fallar cerrado a ampliar el corte. La última sonda recibe
-  solo el tiempo restante, sin los anteriores 5 s adicionales. RC0 llegado al
-  vencer el plazo tampoco se acepta. Se conserva cada intento en el log de fase.
-  RC1/2 mantienen el polling previo por discrepancia/error de consulta; otros
-  errores y señales de la sonda abortan la fase y conservan su RC, no se ignoran.
-  `SECONDS` tiene resolución de un segundo: no es un reloj monotónico; el saldo
-  limita el trabajo de espera sin depender de él. No es una garantía de tiempo
-  real estricto ni incluye el coste de lanzar procesos/planificación.
-  La reversa tiene su propio presupuesto. Esto no es un plazo global de la
-  transacción: copia, firma, reinicio, arranque previo a `main`, fallos del kernel
-  o planificación no tienen aquí un watchdog independiente. No se promete una
-  duración máxima de interrupción del audio.
+- La sonda arma un temporizador **antes de cualquier llamada HAL**: por defecto
+  5 s; acepta `1..5` segundos (interfaz anterior) o `1ms..5000ms`, sin cero,
+  signos, decimales ni ceros iniciales. `setitimer(ITIMER_REAL)` usa duración
+  relativa, no hora de pared; permite el último resto de milisegundos sin
+  redondearlo a segundos. Instala `sigaction` y desbloquea SIGALRM explícitamente
+  con `sigprocmask`, también si llega bloqueada/ignorada. Fallar preparando la
+  señal/temporizador devuelve RC2 antes de HAL. El manejador usa solo
+  `write`/`_exit(124)`, incluso con IPC bloqueada. RC124 solo es reintentable
+  dentro del plazo; nunca acredita presencia/ausencia. No requiere `timeout`.
+- El propio helper firmado ofrece `--monotonic-ms`: solo lee
+  `clock_gettime(CLOCK_MONOTONIC)`, sin entrar en HAL. El gestor valida su salida
+  y comprueba disponibilidad antes de mutar bundles. No usa `SECONDS`, reloj de
+  pared, saldo conservador, número de consultas ni herramientas externas de reloj.
+  Cada fase fija una sola vez `deadline=now+40000`. Las consultas fallidas rápidas
+  consumen únicamente su tiempo real, por lo que HAL puede publicarse después
+  de 8/10 s o cerca de 40 s, no solo durante los primeros ~6 s.
+- Cada consulta recibe `min(5000, deadline-now)` milisegundos positivos, y cada
+  pausa `min(1000, deadline-now)`; se vuelve a medir antes de consultar, pausar y
+  aceptar RC0. Un RC0 tardío se rechaza. No se repone plazo con RC1/2/124; otros
+  errores/señales abortan conservando su RC. Cada intento queda en el log de fase.
+  Congelar/retroceder el reloj de pared no amplía ni acorta la ventana monotónica.
+  La reversa usa un plazo independiente. Son ~40 s de sondeo por fase, no una
+  garantía de tiempo real estricto: el coste entre medir y lanzar la sonda,
+  planificación, arranque previo a `main`, kernel/IO y otros pasos (copia, firma,
+  reinicio) no tienen aquí watchdog independiente. No es un plazo global de la
+  transacción ni una promesa de duración máxima de interrupción del audio.
 
 ## Reversa e interrupciones
 
@@ -254,6 +251,12 @@ python3 ci/export_sources.py --out build/public-sources-lock-fix
 
 ## Máscara heredada, reloj adverso y stderr — corrección sobre `9a70858`
 
+**Registro histórico de `6e533f7`, no contrato vigente**: el saldo conservador
+descrito abajo reducía la ventana útil a ~6 s con consultas rápidas fallidas.
+Queda sustituido por el plazo monotónico del contrato anterior y la regresión
+de ventana real documentada a continuación. Las recetas históricas requieren
+las fuentes de prueba de su revisión; los tests actuales usan la nueva interfaz.
+
 **41/41 métodos del gestor y 8/8 de la sonda C, GNU Bash 5.2/Linux**. El cambio
 productivo se limita a la preparación de SIGALRM, saldo conservador del polling
 y aviso RC124. Las guardas, RC de error/estado, reversa y traps del padre no se
@@ -307,6 +310,43 @@ compartía el contador de reinicios entre los subcasos stderr; se aisló la fixt
 y la suite final completa pasó. No se presenta ese primer ensayo como verde.
 No se ejecutó Bash 3.2 ni SDK Apple en este Linux. No se acredita carga nativa,
 audio sano, ni un plazo de toda la transacción. No se tocó la Mac del usuario.
+
+## Ventana monotónica real — corrección sobre `6e533f7`
+
+**55/55 métodos del gestor y 10/10 de la sonda C, GNU Bash 5.2/Linux**, sin
+fallos ni errores. Fuentes HAL/SDK sintéticas; shell, procesos, señales, pausas,
+temporizadores y reloj monotónico son reales. Las pruebas transaccionales sin
+requisitos temporales usan ticks sintéticos explícitos para no gastar 40 s por
+caso negativo; los casos temporales usan el modo C de producción.
+
+- Publicación a 8/10 s en principal: RC0 a 8,51/10,78 s; en reversa tras fallo
+  del reinicio principal: RC7 conservado, recuperación verificada a 8,50/10,75 s,
+  bytes/respaldo iguales y candado libre. Publicación a 38 s: RC0 a 38,79 s.
+- Timeout permanente con plazo productivo: 40,17 s incluida preparación y
+  reversa rápida; última consulta <5 s. RC0 fuera del plazo se rechaza.
+- Pared congelada y RC1 lento (0,35 s): principal y reversa consumen ~40 s cada
+  una, 80,13 s total; ambas quedan honestamente sin verificar, con bytes y
+  respaldo restaurados/candado libre. Plazos sandbox de 3 s prueban también
+  pared congelada/retrocedida con RC1 lento (~6,23/~6,25 s ambas fases).
+- Pared congelada/retrocedida con RC1/2/124 transitorios lentos, seguida de
+  presencia correcta: principal y reversa verifican a ~5,8 s, sin éxito antes
+  de la publicación. Bloqueos permanentes conservan también sus límites.
+- SIGALRM bloqueada/ignorada heredada, directa/vía Bash, sigue acotada; se añaden
+  temporizadores reales de 1/125/999 ms con máscara bloqueada/ignorada.
+  Doble Ctrl-C durante HAL principal/reversa conserva RC130, bytes y candado.
+- `--monotonic-ms` no entra en HAL ni siquiera con HAL sintética colgada. Un
+  reloj fallido/salida inválida se rechaza antes de desplazar bundles. Un caso
+  usa reloj y consultas desde el mismo helper C de la transacción, sin sustituir
+  la ruta de reloj. Se mantienen las pruebas previas de señales y stderr roto.
+
+La suite es sensible a la regresión original: los cuatro casos de publicación
+8/10 s ejecutados contra `6e533f7` fallan por abandono antes de la publicación;
+0 errores del arnés. No se aceptan HAL ausente, consulta fallida, timeout ni
+recuperación sin verificar como equivalentes a éxito.
+
+Evidencia cruda: `/root/.hermes/datos/rea-neep/evidence/hal-monotonic-window-fix/`.
+No acredita SDK Apple, Bash 3.2, coreaudiod, carga/firma nativa ni salud de audio.
+La CI del SHA exacto y la aceptación física se informan por separado.
 
 ## Aceptación nativa pendiente
 

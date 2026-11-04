@@ -30,23 +30,32 @@ else
     (umask 077; mkdir "$history")
 fi
 txn=''; old=0; published=0; committed=0; changed=0; probe=''
+monotonic_ms() {
+    local value
+    # Reuse the signed, transaction-owned helper; no PATH clock or wall time.
+    if value="$("$probe" --monotonic-ms)" && [[ "$value" =~ ^[0-9]{1,15}$ ]]; then
+        printf '%s\n' "$((10#$value))"
+        return 0
+    fi
+    echo 'Cannot read monotonic clock; HAL state is unverified' >&2
+    return 2
+}
 wait_for_hal() {
-    local expected="$1" phase="$2" attempt rc remaining budget allowance=40 deadline=$((SECONDS+40))
-    # One deadline per phase, never reset after a timeout. Each fresh signed
-    # probe gets at most five seconds AND no more than the remaining budget.
-    # Charge the FULL requested probe budget plus each sleep, even on early
-    # failure. This conservative allowance cannot grow if wall time goes back
-    # or freezes. No external clock helper or new privileged path is needed.
-    # Keep all attempts: a later success must not erase a blocked HAL query.
-    for ((attempt=0; attempt<40 && allowance>0 && SECONDS<deadline; attempt++)); do
-        remaining=$((deadline-SECONDS))
+    local expected="$1" phase="$2" rc now deadline remaining budget pause
+    now="$(monotonic_ms)" || return 2
+    deadline=$((now+40000))
+    # One elapsed-time deadline per phase, never reset on errors/timeouts.
+    # Early failures consume only real elapsed time, not five-second credits.
+    while :; do
+        now="$(monotonic_ms)" || return 2
+        remaining=$((deadline-now))
+        [[ "$remaining" -gt 0 ]] || break
         budget=$remaining
-        [[ "$budget" -le "$allowance" ]] || budget=$allowance
-        [[ "$budget" -le 5 ]] || budget=5
-        allowance=$((allowance-budget))
-        if "$probe" "$expected" "$budget" >> "$txn/$phase-hal-state.log" 2>&1; then
+        [[ "$budget" -le 5000 ]] || budget=5000
+        if "$probe" "$expected" "${budget}ms" >> "$txn/$phase-hal-state.log" 2>&1; then
             # Even RC0 is not accepted after the phase deadline.
-            [[ "$SECONDS" -lt "$deadline" ]] && return 0
+            now="$(monotonic_ms)" || return 2
+            [[ "$now" -lt "$deadline" ]] && return 0
             break
         else rc=$?; fi
         case "$rc" in
@@ -56,10 +65,12 @@ wait_for_hal() {
                  (trap '' PIPE; echo "HAL probe deadline exceeded; retrying within phase budget: $txn/$phase-hal-state.log" >&2) || : ;;
             *) echo "HAL probe failed (exit $rc): $txn/$phase-hal-state.log" >&2; return "$rc" ;;
         esac
-        [[ "$SECONDS" -lt "$deadline" ]] || break
-        [[ "$allowance" -gt 0 ]] || break
-        allowance=$((allowance-1))
-        /bin/sleep 1
+        now="$(monotonic_ms)" || return 2
+        remaining=$((deadline-now))
+        [[ "$remaining" -gt 0 ]] || break
+        [[ "$remaining" -le 1000 ]] || remaining=1000
+        printf -v pause '%d.%03d' "$((remaining/1000))" "$((remaining%1000))"
+        /bin/sleep "$pause"
     done
     echo "HAL state verification timed out (expected $expected): $txn/$phase-hal-state.log" >&2
     return 1
@@ -160,6 +171,7 @@ probe="$txn/nv-driver-state"
 /usr/sbin/chown root:wheel "$probe"
 /bin/chmod 700 "$probe"
 /usr/bin/codesign --verify --strict "$probe"
+monotonic_ms >/dev/null # Fail before mutation if the required clock is unavailable.
 if [[ -n "$src" ]]; then
     /usr/bin/ditto "$src" "$txn/candidate.driver"
     /usr/sbin/chown -R root:wheel "$txn/candidate.driver"
