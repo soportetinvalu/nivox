@@ -145,26 +145,22 @@ final class EngineChanges { var count = 0 }
         check(ProbeGuard.captureProblem(snapshot(streams: []), channel: 0) != nil, "no streams refused")
     }
 
-    static func hardware() -> [String: Any] {
-        let devices = ProbeInput.devices()
-        var out: [String: Any] = ["physical_inputs": devices.map { "\($0.name) · \($0.channels) ch · \(Int($0.rate)) Hz" }]
-        guard let d = devices.first else { out["status"] = "NO_PHYSICAL_INPUT_ON_THIS_MAC"; return out }
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            out["status"] = "PHYSICAL_INPUT_PRESENT_BUT_TCC_NOT_AUTHORIZED"; return out
-        }
-        guard let snap = ProbeInput.snapshot(d.deviceID), ProbeGuard.captureProblem(snap, channel: 0) == nil else {
-            out["status"] = "PHYSICAL_INPUT_NOT_48K_FLOAT32"; return out
-        }
-        // New path.
+    static func live(_ d: ProbeInputDevice) -> [String: Any] {
+        var out: [String: Any] = ["name": d.name, "uid": d.id, "channels": d.channels, "rate": Int(d.rate)]
+        guard let snap = ProbeInput.snapshot(d.deviceID) else { out["status"] = "SNAPSHOT_UNAVAILABLE"; return out }
+        out["snapshot"] = snap.text
+        if let problem = ProbeGuard.captureProblem(snap, channel: 0) { out["status"] = "NOT_ELIGIBLE: " + problem; return out }
+        // New path: IOProc on this explicit device.
         guard let session = try? CaptureSession() else { fatalError("session") }
         let hal = HALCapture(device: d, channel: 0, session: session)
-        do { try hal.start {} } catch { out["status"] = "HAL_START_FAILED: \(error.localizedDescription)"; return out }
+        let notified = EngineChanges()
+        do { try hal.start { notified.count += 1 } } catch { out["status"] = "HAL_START_FAILED: \(error.localizedDescription)"; return out }
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        let stillSame = ProbeGuard.difference(from: snap, to: ProbeInput.snapshot(d.deviceID))
         hal.stop()
-        out["hal_blocks"] = np_blocks(session.handle)
-        out["hal_frames"] = np_received(session.handle)
-        out["hal_error"] = np_error(session.handle)
-        check(np_blocks(session.handle) > 0 && np_error(session.handle) == 0, "live HAL capture delivered contiguous blocks")
+        out["hal"] = ["blocks": np_blocks(session.handle), "frames": np_received(session.handle),
+                      "error": Int(np_error(session.handle)), "hal_notifications": notified.count,
+                      "state_difference": stillSame ?? "none"] as [String: Any]
         // Historical path, diagnostic only: AVAudioEngine bound to the same device.
         let engine = AVAudioEngine(), changes = EngineChanges()
         let observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
@@ -178,8 +174,20 @@ final class EngineChanges { var count = 0 }
         engine.stop(); engine.inputNode.removeTap(onBus: 0)
         NotificationCenter.default.removeObserver(observer)
         out["legacy_engine"] = ["bound": bound, "started": started, "bus_channels": Int(bus.channelCount),
-                                "hal_channels": d.channels, "config_changes": changes.count] as [String: Any]
+                                "bus_rate": Int(bus.sampleRate), "hal_channels": d.channels,
+                                "config_changes": changes.count] as [String: Any]
         out["status"] = "LIVE_HARDWARE_EXERCISED"
+        return out
+    }
+
+    static func hardware() -> [String: Any] {
+        let devices = ProbeInput.devices()
+        let auth = AVCaptureDevice.authorizationStatus(for: .audio)
+        var out: [String: Any] = ["physical_inputs": devices.map { "\($0.name) · \($0.channels) ch · \(Int($0.rate)) Hz" },
+                                  "tcc_audio_status_raw": auth.rawValue]
+        if devices.isEmpty { out["status"] = "NO_PHYSICAL_INPUT_ON_THIS_MAC"; return out }
+        out["devices"] = devices.map { live($0) }
+        out["status"] = "PHYSICAL_INPUTS_TRIED"
         return out
     }
 
