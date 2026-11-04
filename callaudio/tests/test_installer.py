@@ -411,13 +411,25 @@ cp -R "$1" "$2"
     def test_second_ctrl_c_during_recovery_probe_does_not_abort_cleanup(self):
         self.installed()
         original = hashes(self.dst)
-        self.helper.write_text('''#!/bin/bash
-n=$(cat "$STATE/restarts")
-touch "$STATE/probe-$n"
-if [ "$n" = 1 ]; then /bin/sleep 10; exit 1; fi
-/bin/sleep 0.25
-exit 0
+        # No shell/child-launch race between readiness and a sleeping command.
+        # The first probe is interruptible before publishing readiness; recovery
+        # inherits SIG_IGN and cannot finish until the test releases its FIFO.
+        gate = self.base / 'probe-release'
+        os.mkfifo(gate)
+        self.helper.write_text(f'''#!{sys.executable}
+import os
+from pathlib import Path
+import signal
+state = Path(os.environ['STATE'])
+n = (state / 'restarts').read_text()
+if n == '1':
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+(state / ('probe-' + n)).touch()
+with (state / 'probe-release').open('rb', buffering=0) as gate:
+    gate.read(1)
 ''')
+        fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, fd)
         p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=self.env,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
@@ -425,6 +437,7 @@ exit 0
             os.killpg(p.pid, signal.SIGINT)
             self.wait_marker('probe-2', p)
             os.killpg(p.pid, signal.SIGINT)
+            os.write(fd, b'x')
             out, err = p.communicate(timeout=10)
         finally:
             if p.poll() is None:
@@ -625,6 +638,37 @@ exec /bin/mv "$@"
         self.assertIn('Refusing quarantined', p.stderr)
         self.assertFalse(self.dst.exists())
         self.assertTrue((self.src / 'quarantine').exists())
+
+    def test_signals_immediately_after_lock_creation_do_not_orphan_it(self):
+        # Signal from inside mkdir, after the real creation but before it returns.
+        # This deterministically covers the former pre-trap window, no sleeps.
+        mkdir = self.bin / 'mkdir'
+        mkdir.write_text('''#!/bin/bash
+/bin/mkdir "$@" || exit $?
+case "$1" in */.NivoxAudio.lock)
+    kill -s "$LOCK_SIGNAL" "$PPID"
+    printf '%s' "$LOCK_SIGNAL" > "$STATE/lock-signal-sent";; esac
+''')
+        mkdir.chmod(0o755)
+        for sig in ['HUP', 'INT', 'TERM', 'PIPE']:
+            with self.subTest(signal=sig):
+                # Isolate historical counterprobe failures after recording them.
+                lock = self.hal / '.NivoxAudio.lock'
+                if lock.exists():
+                    lock.rmdir()
+                if not self.dst.exists():
+                    self.installed()
+                original = hashes(self.dst)
+                self.env['LOCK_SIGNAL'] = sig
+                p = self.run_manager('uninstall')
+                self.assertEqual((self.base / 'lock-signal-sent').read_text(), sig)
+                self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn('Completed uninstall', p.stdout)
+                self.assertFalse(self.dst.exists())
+                self.assertEqual(hashes(self.previous()[-1]), original)
+                self.assertEqual((self.base / 'restarts').read_text(), '1')
+                self.assertEqual((self.base / 'probes').read_text().splitlines()[-1], 'absent')
 
     def test_lock_rejects_parallel_transaction(self):
         self.installed()

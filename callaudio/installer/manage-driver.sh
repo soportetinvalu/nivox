@@ -29,7 +29,6 @@ if [[ -e "$history" || -L "$history" ]]; then
 else
     (umask 077; mkdir "$history")
 fi
-mkdir "$lock" || { echo 'Another transaction or stale lock exists; inspect before retrying' >&2; exit 1; }
 txn=''; old=0; published=0; committed=0; changed=0; probe=''
 wait_for_hal() {
     local expected="$1" phase="$2" attempt rc deadline=$((SECONDS+40))
@@ -102,6 +101,11 @@ finish() {
     rmdir "$lock" || rc=1
     exit "$rc"
 }
+# Ignore catchable termination only across lock acquisition and trap setup.
+# mkdir inherits this protection; no bundle mutation happens in this interval.
+# Install EXIT only after success: a contender must never remove another lock.
+trap '' HUP INT TERM PIPE
+mkdir "$lock" || { echo 'Another transaction or stale lock exists; inspect before retrying' >&2; exit 1; }
 trap 'finish "$?"' EXIT
 # Do not exit from a signal trap: it could interrupt an EXIT trap before that
 # trap has protected recovery. Both paths enter the same cleanup directly.

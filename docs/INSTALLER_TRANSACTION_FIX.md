@@ -142,7 +142,9 @@ las tres `TimeoutExpired` son la contraprueba esperada, no una aceptación verde
 
 ### Regresiones adicionales X1/X2b/X4b sobre `faa7b6d`
 
-- Suite completa: **29/29 en GNU Bash 3.2.57 y 5.2.21 sobre Linux**. `--bash`
+- Resultado histórico: **29/29 en GNU Bash 3.2.57 y 5.2.21 sobre Linux**; la
+  auditoría posterior encontró inestable la fixture de doble Ctrl-C en 3.2
+  (véase la corrección FIFO abajo). No acredita estabilidad repetida. `--bash`
   selecciona explícitamente el shell del gestor; los sustitutos OS/HAL siguen
   usando `/bin/bash`. No acredita el binario Bash de Apple ni semántica HAL real.
 - X1: ventana ampliada **antes del primer comando de `finish`**, con HUP/INT/TERM,
@@ -179,6 +181,56 @@ python3 callaudio/tests/test_installer.py \
   InstallerTests.test_X1_signal_before_first_cleanup_command_still_recovers \
   InstallerTests.test_X2b_stderr_full_does_not_abort_rescue_restart_or_unlock \
   InstallerTests.test_X4b_stderr_epipe_does_not_abort_recovery_or_unlock
+```
+
+## Candado y fixture sincronizada después de `6950832`
+
+- El manifiesto de `6950832` conservaba siete hashes antiguos: workflow callaudio,
+  README callaudio, gestor, sonda C, ambas pruebas del instalador/sonda y este
+  documento. Se regenera desde `collect_payload()` sin ampliar la allowlist ni
+  modificar las comprobaciones de igualdad de bytes.
+- Se mueve `mkdir "$lock"` después de definir `finish`. HUP/INT/TERM/PIPE se
+  ignoran únicamente desde la adquisición hasta activar los traps existentes;
+  `mkdir` hereda esa protección. En ese tramo no se desplaza/publica ningún
+  bundle. Las señales en ese tramo se descartan, no se difieren. EXIT se instala
+  solo tras adquirir el candado: un competidor no puede liberar el ajeno.
+  No se añade estado, supervisor ni recuperación automática de candados viejos.
+  La reversa y las guardas de sustitución permanecen intactas. SIGKILL y pérdida
+  de energía siguen fuera de esta garantía.
+- La fixture anterior publicaba `probe-1` antes de lanzar `sleep 10`: SIGINT
+  podía llegar entre ambos y dejar un hijo vivo más allá del plazo del arnés.
+  Ahora un proceso Python configura SIGINT antes de publicar su marcador y
+  bloquea en FIFO; la recuperación conserva SIG_IGN y el test la libera solo
+  después del segundo Ctrl-C. No hay espera por duración supuesta ni se amplía
+  el plazo. Los sustitutos OS/HAL siguen siendo sintéticos.
+- **30/30** pruebas en GNU Bash **3.2.57 y 5.2.21 sobre Linux**, cero errores.
+  Incluyen cuatro señales justo después del `mkdir` real, candado competidor,
+  reversa, rescate y stderr roto. Doble Ctrl-C: **100/100 repeticiones por shell**.
+  Sintaxis `-n` pasa en ambos. Sonda C: **6/6**, sin cambio de fuente.
+- Contraprueba de candado contra `6950832`: tres subcasos (HUP/TERM/PIPE) dejan
+  candado huérfano en cada shell; SIGINT solo al padre con hijo RC0 no reproduce
+  ese fallo. Cero errores del arnés. Doble Ctrl-C contra `fca9f9e`: un fallo por
+  candado retenido en cada shell. `faa7b6d` pasa ese método aislado: no detecta
+  su ventana distinta de entrada a EXIT (cubierta por X1). Se conservan también
+  esos controles positivos, sin presentarlos como contrapruebas rojas.
+- El manifiesto viejo falla únicamente `test_source_manifest_matches_payload`
+  (24 métodos, un fallo, cero errores). La prueba no se relaja.
+- Evidencia cruda local: `build/lock-manifest-fix/`, con JSON y logs por shell,
+  controles históricos, repetidor FIFO y prueba de entrega/manifiesto.
+  Gestor SHA-256: `ea3f8b21e66de6a4b6693a43c9f4d15e4b6a8c12193c256bfd3b97f151037bbe`.
+  Prueba SHA-256: `9c04ded1240403e540c6c686e6d4d3a6bc1681d3322d2b012c6fb669c132ca04`.
+
+```sh
+python3 callaudio/tests/test_installer.py --bash /ruta/a/bash-3.2 \
+  --evidence build/installer-lock-bash32.json
+python3 callaudio/tests/test_installer.py --bash /bin/bash \
+  --evidence build/installer-lock-bash5.json
+git show 6950832:callaudio/installer/manage-driver.sh > build/manager-6950832.sh
+python3 callaudio/tests/test_installer.py --manager-source build/manager-6950832.sh \
+  InstallerTests.test_signals_immediately_after_lock_creation_do_not_orphan_it
+# Se espera RC1 y fallo concreto por candado retenido, no un error de ejecución.
+python3 tests/test_delivery.py --out build/delivery-lock-fix
+python3 ci/export_sources.py --out build/public-sources-lock-fix
 ```
 
 ## Aceptación nativa pendiente
