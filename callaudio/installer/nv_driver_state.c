@@ -13,7 +13,7 @@
 static void deadline_exceeded(int signal_number) {
     (void)signal_number;
     /* Only async-signal-safe operations, including when HAL is blocked. */
-    static const char message[] = "HAL probe exceeded five-second deadline\n";
+    static const char message[] = "HAL probe exceeded deadline (at most five seconds)\n";
     (void)write(STDERR_FILENO, message, sizeof message - 1);
     _exit(124);
 }
@@ -52,12 +52,15 @@ static int lookup(const char *uid, AudioObjectID *device) {
 }
 
 int main(int argc, char **argv) {
-    if (signal(SIGALRM, deadline_exceeded) == SIG_ERR) return 2;
-    alarm(5); /* A hung CoreAudio IPC must not hold the transaction forever. */
-    if (argc != 2 || (strcmp(argv[1], "present") && strcmp(argv[1], "absent"))) {
-        fprintf(stderr, "Usage: nv-driver-state present|absent\n");
+    unsigned budget = 5;
+    if ((argc != 2 && argc != 3) || (strcmp(argv[1], "present") && strcmp(argv[1], "absent")) ||
+        (argc == 3 && (strlen(argv[2]) != 1 || argv[2][0] < '1' || argv[2][0] > '5'))) {
+        fprintf(stderr, "Usage: nv-driver-state present|absent [deadline-seconds:1..5]\n");
         return 2;
     }
+    if (argc == 3) budget = (unsigned)(argv[2][0] - '0');
+    if (signal(SIGALRM, deadline_exceeded) == SIG_ERR) return 2;
+    alarm(budget); /* Before any HAL call; never longer than the phase remainder. */
     int present = !strcmp(argv[1], "present");
     AudioObjectPropertyAddress a = address(kAudioHardwarePropertyDevices);
     UInt32 size = 0;

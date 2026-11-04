@@ -46,12 +46,20 @@ no se anticipa ni dispensa los fallos anteriores.
   ni solicitud TCC. Debe viajar firmado en el paquete completo; no mezclar esta
   fuente con una sonda histórica. Se rechaza helper symlink/cuarentena y se copia
   a una transacción root-only con permisos restringidos antes de usarlo.
-- La sonda arma `alarm(5)` **antes de cualquier llamada HAL**. El manejador usa
-  solo `write`/`_exit(124)`, incluso con una consulta IPC bloqueada. RC124 aborta
-  la fase inmediatamente y provoca reversa; no se repite 40 veces una sonda
-  colgada. No depende de una utilidad `timeout` ausente en macOS.
-- El polling tiene además presupuesto transcurrido de 40 s (`SECONDS`) y máximo
-  de 40 consultas; la última consulta iniciada puede usar hasta 5 s adicionales.
+- La sonda arma una alarma **antes de cualquier llamada HAL**: por defecto 5 s,
+  o un argumento explícito entero `1..5` que nunca permite desactivarla/ampliarla.
+  El gestor pasa `min(5, deadline-SECONDS)`. El manejador usa solo
+  `write`/`_exit(124)`, incluso con una consulta IPC bloqueada. RC124 es un fallo
+  reintentable solo dentro del plazo de la fase; nunca acredita presencia/ausencia.
+  No depende de una utilidad `timeout` ausente en macOS.
+- El polling tiene presupuesto transcurrido de 40 s (`SECONDS`) y máximo
+  de 40 consultas, sin reiniciar el plazo al reintentar. La última sonda recibe
+  solo el tiempo restante, sin los anteriores 5 s adicionales. RC0 llegado al
+  vencer el plazo tampoco se acepta. Se conserva cada intento en el log de fase.
+  RC1/2 mantienen el polling previo por discrepancia/error de consulta; otros
+  errores y señales de la sonda abortan la fase y conservan su RC, no se ignoran.
+  `SECONDS` tiene resolución de un segundo: este límite del polling no es una
+  garantía de tiempo real ni incluye el coste de lanzar procesos/planificación.
   La reversa tiene su propio presupuesto. Esto no es un plazo global de la
   transacción: copia, firma, reinicio, arranque previo a `main`, fallos del kernel
   o planificación no tienen aquí un watchdog independiente. No se promete una
@@ -234,6 +242,34 @@ python3 ci/export_sources.py --out build/public-sources-lock-fix
 ```
 
 ## Aceptación nativa pendiente
+
+### Corrección de la causa temporal evidenciada en run `41770252364`
+
+La recuperación de `coreaudiod` tras reinicios consecutivos puede superar la
+alarma individual de 5 s (throttle de launchd observado de unos 10 s). Se cambia
+solo la política de RC124, no la definición de presencia ni las guardas de firma,
+reemplazo, reinicio o reversa. No se añaden esperas ciegas a la CI.
+
+Pruebas actuales: **36 métodos del gestor en GNU Bash 5.2/Linux**, incluidos
+timeout transitorio en install/uninstall/restore, HAL que sigue ausente, timeout
+permanente, reversa verificada/no verificada, éxito tardío rechazado, RC126 fatal,
+doble Ctrl-C después de timeouts en ambas fases, y los casos anteriores de
+HUP/INT/TERM/PIPE, candado y stderr roto. Una prueba usa los **40 s reales** de
+producción, con sondeos bloqueantes y pausas reales; exige 39..42 s de reloj
+externo incluyendo preparación/reversa, y una última sonda con presupuesto <5 s.
+Otras usan plazos de 1..3 s exclusivamente en la copia sandbox para aislar cada
+caso. La reversa conserva su plazo separado; no se promete transacción total de
+40 s. **7 métodos de sonda C** verifican también argumentos inválidos y alarma
+reducida a 1 s en las tres llamadas HAL bloqueadas. HAL/SDK siguen sintéticos.
+
+Evidencia: `build/installer-timeout-final.json`, `build/driver-timeout-fix.json`.
+Contraprueba aislada contra `e484669`: install/uninstall/restore rechazan el
+timeout transitorio (tres fallos de aserción, cero errores del arnés). El primer
+intento de contraprueba encadenaba precondiciones y produjo un error de fixture;
+se conserva aparte y no cuenta como prueba de sensibilidad de restore.
+
+El cambio de instalador requiere revisión independiente posterior. Ni estas
+pruebas ni una CI aún pendiente autorizan instalar en una Mac real.
 
 Exige SDK Apple/Bash 3.2/ZIP/firma del SHA exacto, retirada y restauración real,
 pruebas de errores y audio/hardware/defaults después. Una firma ad hoc correcta

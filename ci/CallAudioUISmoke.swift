@@ -271,6 +271,13 @@ import NivoxCallAudio
         // window AFTER that installation; never force a child frame or relabel
         // an expanded viewport. Keep the before/after geometry as evidence.
         window.setContentSize(NSSize(width: CGFloat(width), height: CGFloat(height)))
+        stages.append(layoutMeasures(window, host: host, stage: "resized_before_reposition"))
+        // AppKit preserves the top edge when chrome/content grows. Reposition
+        // the parent on its actual screen; never shrink the requested viewport
+        // or weaken the fitsScreen/OCR guards if the whole frame cannot fit.
+        if let visible = window.screen?.visibleFrame {
+            window.setFrameTopLeftPoint(NSPoint(x: visible.minX, y: visible.maxY))
+        }
         try? await Task.sleep(nanoseconds: 300_000_000)
         host.layoutSubtreeIfNeeded()
         stages.append(layoutMeasures(window, host: host, stage: "settled"))

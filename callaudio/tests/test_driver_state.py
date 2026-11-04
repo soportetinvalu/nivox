@@ -105,10 +105,11 @@ class DriverStateTests(unittest.TestCase):
     def probe(self, expected, scenario):
         return self.run_probe(expected, scenario, 5).returncode
 
-    def run_probe(self, expected, scenario, timeout):
+    def run_probe(self, expected, scenario, timeout, budget=None):
         start = time.monotonic()
         try:
-            p = subprocess.run([str(self.binary), expected], env={'SCENARIO': scenario},
+            command = [str(self.binary), expected] + ([] if budget is None else [str(budget)])
+            p = subprocess.run(command, env={'SCENARIO': scenario},
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             RECORDS.append(dict(test=self.id(), expected=expected, scenario=scenario,
@@ -145,15 +146,28 @@ class DriverStateTests(unittest.TestCase):
     def test_usage_error_is_not_success(self):
         self.assertEqual(self.probe('anything', 'present'), 2)
 
+    def test_remaining_budget_is_bounded_and_cannot_disable_alarm(self):
+        for budget in ['', '0', '-1', '6', '40', '01', '1x']:
+            with self.subTest(budget=budget):
+                p = self.run_probe('absent', 'service-hang', 3, budget=budget)
+                self.assertEqual(p.returncode, 2, p.stderr)
+        for scenario in ['service-hang', 'lookup-hang', 'alive-hang']:
+            with self.subTest(scenario=scenario):
+                start = time.monotonic()
+                p = self.run_probe('present', scenario, 3, budget=1)
+                self.assertEqual(p.returncode, 124, p.stderr)
+                self.assertGreaterEqual(time.monotonic() - start, 0.9)
+                self.assertLess(time.monotonic() - start, 3)
+
     def test_blocked_hal_calls_have_real_process_deadline(self):
-        # Execute the unchanged production C, including its real five-second alarm.
+        # Execute the production C, including its default five-second alarm.
         for scenario in ['service-hang', 'lookup-hang', 'alive-hang']:
             with self.subTest(scenario=scenario):
                 start = time.monotonic()
                 p = self.run_probe('present', scenario, 8)
                 elapsed = time.monotonic() - start
                 self.assertEqual(p.returncode, 124, p.stderr)
-                self.assertIn('five-second deadline', p.stderr)
+                self.assertIn('HAL probe exceeded deadline', p.stderr)
                 self.assertGreaterEqual(elapsed, 4)
                 self.assertLess(elapsed, 8)
 

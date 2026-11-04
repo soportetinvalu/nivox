@@ -29,7 +29,12 @@ HAL, tanto en candidato como en mutante. 592 es el mínimo efectivo observado
 en la VM; no se presenta un hijo de 560 como una ventana con pestañas de 560.
 900 no cabe en el área visible de 1024×677 del runner. Tras instalarse el chrome
 nativo de `TabView`, se redimensiona la ventana padre con `setContentSize`, sin
-imponer dimensiones al hijo. Se guardan medidas antes y después; el tamaño
+imponer dimensiones al hijo. Tras el resize se recoloca el borde superior
+izquierdo en el `visibleFrame` de su pantalla real: AppKit puede conservar el
+borde superior y hacer crecer el marco por debajo del área visible. Se conserva
+la geometría `resized_before_reposition` y `settled`. No se cambia OCR, tamaños,
+tolerancias ni la aserción de ventana completa dentro de pantalla; si no cabe,
+sigue fallando. Se guardan medidas antes y después; el tamaño
 efectivo debe coincidir con el solicitado y la ventana completa debe caber en
 la pantalla visible real. La ventana no puede crecer
 silenciosamente para acomodar el texto. Se recorren posiciones solapadas del

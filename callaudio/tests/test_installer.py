@@ -87,8 +87,10 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
     def tearDown(self):
         self.tmp.cleanup()
 
-    def record(self, p, args):
+    def record(self, p, args, elapsed_seconds=None):
         RECORDS.append(dict(test=self.id(), args=list(map(str, args)), rc=p.returncode,
+                            elapsed_seconds=elapsed_seconds,
+                            budgets=(self.base / 'budgets').read_text().splitlines() if (self.base / 'budgets').exists() else [],
                             stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
                             lock=(self.hal / '.NivoxAudio.lock').exists(),
                             restarts=(self.base / 'restarts').read_text() if (self.base / 'restarts').exists() else '0',
@@ -327,19 +329,158 @@ exec /bin/mv "$@"
         self.assertIn('RECOVERY UNVERIFIED', p.stderr)
         self.assertNotIn('state restored', p.stderr)
 
-    def test_probe_timeout_is_not_retried_and_recovery_is_attempted(self):
+    def timeout_then_state_helper(self, final_rc=None):
+        # Two timeouts followed by the real sandbox filesystem-state check.
+        body = self.helper.read_text()
+        injection = '''
+n=0; [ ! -e "$STATE/timeout-count" ] || n=$(cat "$STATE/timeout-count")
+n=$((n+1)); echo "$n" > "$STATE/timeout-count"
+if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
+'''
+        if final_rc is not None:
+            injection += f'exit {final_rc}\n'
+        self.helper.write_text(body.replace('n=$(cat "$STATE/restarts")',
+                                           injection + '\nn=$(cat "$STATE/restarts")', 1))
+
+    def test_transient_probe_timeouts_require_eventual_state_for_install_remove_restore(self):
+        self.timeout_then_state_helper()
+        for mode in ['install', 'uninstall', 'restore']:
+            with self.subTest(mode=mode):
+                # Each subcase has independent bytes/backup prerequisites, so
+                # a historical install failure cannot invalidate restore setup.
+                shutil.rmtree(self.dst, ignore_errors=True)
+                history = self.library / 'Audio/.NivoxAudio-history'
+                shutil.rmtree(history, ignore_errors=True)
+                (self.base / 'timeout-count').unlink(missing_ok=True)
+                (self.base / 'probes').unlink(missing_ok=True)
+                source = []
+                if mode == 'install':
+                    source = [self.src]
+                elif mode == 'uninstall':
+                    shutil.copytree(self.src, self.dst)
+                else:
+                    backup = history / 'transaction.fixture/previous.driver'
+                    shutil.copytree(self.src, backup)
+                    source = [backup]
+                p = self.run_manager(mode, *source)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                expected = 'absent' if mode == 'uninstall' else 'present'
+                self.assertEqual((self.base / 'probes').read_text().splitlines(), [expected] * 3)
+                self.assertEqual(hashes(self.dst), None if mode == 'uninstall' else hashes(self.src))
+                self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+                txn = sorted((self.library / 'Audio/.NivoxAudio-history').glob('transaction.*'),
+                             key=lambda p: p.stat().st_mtime_ns)[-1]
+                self.assertEqual((txn / 'transaction-hal-state.log').read_text().count('injected transient timeout'), 2)
+
+    def test_timeout_followed_by_missing_hal_is_not_success(self):
+        self.timeout_then_state_helper(final_rc=1)
+        p = self.run_manager('install', self.src)
+        self.assert_failed(p)
+        self.assertFalse(self.dst.exists())
+        self.assertIn('HAL state verification timed out (expected present)', p.stderr)
+        self.assertIn(hashes(self.src), [hashes(b) for b in self.failed()])
+
+    def shorten_phase_budget(self, seconds):
+        text = self.script.read_text()
+        self.assertIn('deadline=$((SECONDS+40))', text)
+        self.script.write_text(text.replace('deadline=$((SECONDS+40))', f'deadline=$((SECONDS+{seconds}))'))
+
+    def blocking_timeout_helper(self, recovery_also=False):
+        # Real alarm/exit124 consumes the budget received from the actual shell.
+        self.helper.write_text(f'''#!{sys.executable}
+import os, signal, sys
+from pathlib import Path
+state = Path(os.environ['STATE'])
+with (state / 'probes').open('a') as log: log.write(sys.argv[1] + '\\n')
+with (state / 'budgets').open('a') as log: log.write(sys.argv[2] + '\\n')
+if {recovery_also!r} or (state / 'restarts').read_text() == '1':
+    signal.signal(signal.SIGALRM, lambda *_: sys.exit(124))
+    signal.alarm(int(sys.argv[2]))
+    while True: signal.pause()
+''')
+
+    def test_permanent_timeout_exhausts_phase_budget_then_restores_bytes(self):
         self.installed()
         original = hashes(self.dst)
+        self.shorten_phase_budget(3)
+        self.blocking_timeout_helper()
+        start = time.monotonic()
+        p = self.run_manager('uninstall')
+        elapsed = time.monotonic() - start
+        self.assert_failed(p)
+        self.assertGreaterEqual(elapsed, 2)
+        self.assertLess(elapsed, 5)
+        self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
+        self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['3', '3'])
+        self.assertEqual(hashes(self.dst), original)
+        self.assertEqual([hashes(b) for b in self.previous()], [original])
+        self.assertIn('state restored', p.stderr)
+
+    def test_permanent_recovery_timeout_has_separate_bounded_budget_and_stays_unverified(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.shorten_phase_budget(2)
+        self.blocking_timeout_helper(recovery_also=True)
+        start = time.monotonic()
+        p = self.run_manager('uninstall')
+        elapsed = time.monotonic() - start
+        self.assert_failed(p)
+        self.assertGreaterEqual(elapsed, 3)
+        self.assertLess(elapsed, 6)
+        self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
+        self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['2', '2'])
+        self.assertEqual(hashes(self.dst), original)
+        self.assertIn('RECOVERY UNVERIFIED', p.stderr)
+        self.assertNotIn('state restored', p.stderr)
+
+    def test_full_40_second_budget_never_restarts_after_timeouts(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.blocking_timeout_helper()
+        # Real polling intervals exercise a final probe with less than five
+        # seconds left, not just repeated immediate rc124 fixtures.
+        (self.bin / 'sleep').write_text('#!/bin/bash\nexec /bin/sleep "$@"\n')
+        start = time.monotonic()
+        p = subprocess.run([BASH, str(self.script), 'uninstall'], env=self.env,
+                           text=True, capture_output=True, timeout=44)
+        elapsed = time.monotonic() - start
+        self.record(p, ['uninstall', 'full-40-second-budget'], elapsed_seconds=elapsed)
+        self.assert_failed(p)
+        self.assertGreaterEqual(elapsed, 39)
+        self.assertLess(elapsed, 42)
+        budgets = list(map(int, (self.base / 'budgets').read_text().splitlines()))
+        self.assertTrue(all(1 <= b <= 5 for b in budgets))
+        self.assertEqual(budgets[0], 5)
+        self.assertTrue(any(b < 5 for b in budgets[:-1]), budgets)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertIn('state restored', p.stderr)
+
+    def test_success_after_deadline_is_rejected(self):
+        self.installed()
+        self.shorten_phase_budget(1)
         self.helper.write_text('''#!/bin/bash
 printf '%s\\n' "$1" >> "$STATE/probes"
-if [ "$(cat "$STATE/restarts")" = 1 ]; then exit 124; fi
+if [ "$(cat "$STATE/restarts")" = 1 ]; then /bin/sleep 1.1; fi
 exit 0
 ''')
         p = self.run_manager('uninstall')
         self.assert_failed(p)
-        self.assertIn('five-second deadline', p.stderr)
+        self.assertIn('HAL state verification timed out', p.stderr)
+        self.assertIn('state restored', p.stderr)
+
+    def test_unexpected_probe_error_is_not_retried_or_accepted(self):
+        self.installed()
+        self.helper.write_text('''#!/bin/bash
+printf '%s\\n' "$1" >> "$STATE/probes"
+if [ "$(cat "$STATE/restarts")" = 1 ]; then exit 126; fi
+exit 0
+''')
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
+        self.assertEqual(p.returncode, 126)
+        self.assertIn('HAL probe failed (exit 126)', p.stderr)
         self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
-        self.assertEqual(hashes(self.dst), original)
+        self.assertIn('state restored', p.stderr)
 
     def test_elapsed_poll_budget_is_not_just_an_attempt_count(self):
         # Shorten only the sandbox budget, never add an environment override.
@@ -422,6 +563,10 @@ from pathlib import Path
 import signal
 state = Path(os.environ['STATE'])
 n = (state / 'restarts').read_text()
+attempt = state / ('timeout-' + n)
+if not attempt.exists():
+    attempt.touch()
+    raise SystemExit(124)
 if n == '1':
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 (state / ('probe-' + n)).touch()

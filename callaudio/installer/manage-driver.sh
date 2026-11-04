@@ -31,16 +31,24 @@ else
 fi
 txn=''; old=0; published=0; committed=0; changed=0; probe=''
 wait_for_hal() {
-    local expected="$1" phase="$2" attempt rc deadline=$((SECONDS+40))
-    # The signed C probe arms a five-second alarm before making any HAL call.
-    # Also cap elapsed polling time, not just the number of failed queries.
+    local expected="$1" phase="$2" attempt rc remaining budget deadline=$((SECONDS+40))
+    # One deadline per phase, never reset after a timeout. Each fresh signed
+    # probe gets at most five seconds AND no more than the remaining budget.
+    # Keep all attempts: a later success must not erase a blocked HAL query.
     for ((attempt=0; attempt<40 && SECONDS<deadline; attempt++)); do
-        if "$probe" "$expected" > "$txn/$phase-hal-state.log" 2>&1; then return 0;
+        remaining=$((deadline-SECONDS))
+        budget=$remaining
+        [[ "$budget" -le 5 ]] || budget=5
+        if "$probe" "$expected" "$budget" >> "$txn/$phase-hal-state.log" 2>&1; then
+            # Even RC0 is not accepted after the phase deadline.
+            [[ "$SECONDS" -lt "$deadline" ]] && return 0
+            break
         else rc=$?; fi
-        if [[ "$rc" == 124 ]]; then
-            echo "HAL probe exceeded its five-second deadline: $txn/$phase-hal-state.log" >&2
-            return 1
-        fi
+        case "$rc" in
+            1|2) : ;; # Existing state mismatch/query errors remain failures to verify.
+            124) echo "HAL probe deadline exceeded; retrying within phase budget: $txn/$phase-hal-state.log" >&2 ;;
+            *) echo "HAL probe failed (exit $rc): $txn/$phase-hal-state.log" >&2; return "$rc" ;;
+        esac
         [[ "$SECONDS" -lt "$deadline" ]] || break
         /bin/sleep 1
     done
