@@ -117,7 +117,7 @@ def main():
                                          HERE / 'tests/test_engine.py', HERE / 'tests/test_integration.py',
                                          HERE / 'python/christian_noise.py', HERE / 'python/ab_wav.py',
                                          HERE / 'python/diagnose_ab.py', HERE / 'tests/test_ab_diagnosis.py',
-                                         HERE / 'ci/FrameworkSmoke.swift',
+                                         HERE / 'ci/FrameworkSmoke.swift', HERE / 'ci/ProbeCaptureSmoke.swift',
                                          HERE / 'App/NoiseProbeApp.swift', HERE / 'App/Info.plist',
                                          HERE / 'App/Entitlements.plist', HERE / 'App/Assets/Nivox.icns',
                                          HERE / 'App/Assets/Nivox-original.png', HERE / 'App/Assets/icon-manifest.json',
@@ -193,6 +193,13 @@ def main():
                 run([*swift_flags, HERE / 'ci/FrameworkSmoke.swift', own, speex,
                      '-framework', 'AVFoundation', '-o', smoke])
                 report['swift_test'] = json.loads(run([smoke]).splitlines()[-1])
+                # Production HAL capture contract: real ProbeInput.swift, synthetic AudioBufferLists,
+                # guard counter-tests, and hardware only if the runner already has a physical input.
+                probe_smoke = out / 'probe_capture_smoke'
+                run([*swift_flags, HERE / 'ci/ProbeCaptureSmoke.swift', HERE / 'App/ProbeInput.swift', own, speex,
+                     '-framework', 'CoreAudio', '-framework', 'AudioToolbox', '-framework', 'CoreFoundation',
+                     '-framework', 'AVFoundation', '-o', probe_smoke])
+                report['probe_capture_smoke'] = json.loads(run([probe_smoke]).splitlines()[-1])
                 app = out / 'Nivox.app'
                 exe = app / 'Contents/MacOS/Nivox'
                 resources = app / 'Contents/Resources'

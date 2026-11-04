@@ -20,7 +20,7 @@ FILES = [
     'App/Assets/BRANDING.md', 'python/christian_noise.py', 'python/ab_wav.py', 'python/diagnose_ab.py',
     'tests/test_ab_diagnosis.py', 'docs/AB_DIAGNOSTICO.md',
     'tests/stream_test.c', 'tests/test_engine.py', 'tests/test_integration.py', 'tests/test_delivery.py',
-    'ci/FrameworkSmoke.swift', 'ci/icon_assets.py', 'ci/export_sources.py',
+    'ci/FrameworkSmoke.swift', 'ci/ProbeCaptureSmoke.swift', 'ci/icon_assets.py', 'ci/export_sources.py',
     'vendor/speexdsp-1.2.1.tar.gz', 'docs/RESULTADOS.md', 'docs/ACEPTACION_MAC.md', 'docs/INTEGRACION.md',
     'App/CallAudio.swift', 'ci/call_audio_build.py', 'tests/test_call_audio.py',
     'callaudio/control/nv_call.h', 'callaudio/control/nv_call_ui.h', 'callaudio/control/nv_call.c', 'callaudio/control/module.modulemap',

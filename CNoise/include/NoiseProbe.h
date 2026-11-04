@@ -22,6 +22,12 @@ void np_destroy(np_session *s); /* after callback and worker quiesce */
 int np_push(np_session *s, const float *input, size_t count);
 /* Same producer; contiguous valid sample times required, discontinuity is sticky. */
 int np_push_timed(np_session *s, const float *input, size_t count, int64_t sample_time);
+/* Core Audio IOProc producer: channel `offset` of `stride`-interleaved Float32 frames
+ * (stride 1 = planar). Chunks through internal scratch; sample_time = device time of
+ * the first frame. Bad layout/stride/offset is a sticky NP_INVALID. */
+int np_push_strided_timed(np_session *s, const float *base, size_t frames,
+                          size_t stride, size_t offset, int64_t sample_time);
+size_t np_blocks(const np_session *s); /* producer calls seen, even empty ones */
 int np_pump(np_session *s); /* worker; no I/O or allocation */
 int np_finish(np_session *s); /* after close: drain, flush, align */
 void np_abort(np_session *s); /* tap format changed: sticky invalid capture */

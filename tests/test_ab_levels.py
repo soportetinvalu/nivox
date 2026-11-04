@@ -150,24 +150,91 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, diagnostic): content_oracle(a,b)
         METRICS['compiled_mutants'] = list(mutants)
 
+    def test_strided_channel_extraction_and_failures(self):
+        """C half of the IOProc capture: same function the Swift callback calls."""
+        p = c.POINTER(c.c_float)
+        LIB.np_create.argtypes = [c.c_uint,c.c_uint,c.c_size_t]; LIB.np_create.restype = c.c_void_p
+        LIB.np_destroy.argtypes = [c.c_void_p]; LIB.np_error.argtypes = [c.c_void_p]
+        LIB.np_received.argtypes = [c.c_void_p]; LIB.np_received.restype = c.c_size_t
+        LIB.np_blocks.argtypes = [c.c_void_p]; LIB.np_blocks.restype = c.c_size_t
+        LIB.np_push_strided_timed.argtypes = [c.c_void_p,p,c.c_size_t,c.c_size_t,c.c_size_t,c.c_int64]
+        LIB.np_pump.argtypes = [c.c_void_p]; LIB.np_close.argtypes = [c.c_void_p]
+        LIB.np_finish.argtypes = [c.c_void_p]; LIB.np_count.argtypes = [c.c_void_p]; LIB.np_count.restype = c.c_size_t
+        LIB.np_raw.argtypes = [c.c_void_p]; LIB.np_raw.restype = p
+        def push(h, data, frames, stride, offset, when):
+            buf = (c.c_float*len(data))(*data)
+            return LIB.np_push_strided_timed(h, buf, frames, stride, offset, when)
+        # Interleaved stereo: channel 1 only, 10000 frames > 4096 scratch, order preserved.
+        n = 10000
+        stereo = [v for i in range(n) for v in (.25, (i % 1000)*1e-4)]
+        h = LIB.np_create(48000,1,20000); self.assertTrue(h)
+        try:
+            self.assertEqual(push(h, stereo, n, 2, 1, 500), 0)
+            self.assertEqual(LIB.np_received(h), n); self.assertEqual(LIB.np_blocks(h), 1)
+            self.assertEqual(LIB.np_pump(h), 0); LIB.np_close(h); self.assertEqual(LIB.np_finish(h), 0)
+            raw = LIB.np_raw(h)
+            expected = list((c.c_float*n)(*[(i % 1000)*1e-4 for i in range(n)]))
+            self.assertEqual([raw[i] for i in range(n)], expected)
+        finally: LIB.np_destroy(h)
+        # Contiguity across calls, then every defect is sticky and fail-closed.
+        block = [0.1]*960
+        cases = [('gap', 481), ('repeat', 479)]
+        for name, second in cases:
+            h = LIB.np_create(48000,1,20000)
+            try:
+                self.assertEqual(push(h, block, 480, 2, 0, 0), 0)
+                self.assertEqual(push(h, block, 480, 2, 0, second), -1, name)
+                self.assertEqual(LIB.np_error(h), -1, name)
+                self.assertEqual(push(h, block, 480, 2, 0, second+480), -1, name+' sticky')
+            finally: LIB.np_destroy(h)
+        bad = [('offset>=stride', 480, 2, 2), ('zero stride', 480, 0, 0), ('stride too large', 1, 1025, 0)]
+        for name, frames, stride, offset in bad:
+            h = LIB.np_create(48000,1,20000)
+            try:
+                self.assertEqual(push(h, block, frames, stride, offset, 0), -1, name)
+                self.assertEqual(LIB.np_error(h), -1, name)
+            finally: LIB.np_destroy(h)
+        for name, value in [('NaN', float('nan')), ('out of range', 1.5)]:
+            h = LIB.np_create(48000,1,20000)
+            try:
+                self.assertEqual(push(h, [value]*960, 480, 2, 1, 0), -1, name)
+                self.assertEqual(LIB.np_error(h), -1, name)
+            finally: LIB.np_destroy(h)
+        h = LIB.np_create(48000,1,20000)
+        try:
+            self.assertEqual(LIB.np_push_strided_timed(h, None, 480, 2, 0, 0), -1)
+            self.assertEqual(LIB.np_push_strided_timed(None, (c.c_float*2)(), 1, 1, 0, 0), -1)
+        finally: LIB.np_destroy(h)
+        METRICS['strided_capture_cases'] = len(cases)+len(bad)+4
+
     def test_swift_wiring_contract_not_native_execution(self):
         app = (ROOT/'App/NoiseProbeApp.swift').read_text()
         route = (ROOT/'App/ProbeInput.swift').read_text()
-        def check(text):
-            self.assertIn('ProbeInput.bind(input, to: d, input: true)',text)
-            self.assertIn('buffer.floatChannelData?[selectedChannel]',text)
-            self.assertIn('np_push_timed(s.handle',text)
-            self.assertIn('p.volume = Float(listenVolume)',text)
-            self.assertIn('(0...1).contains(listenVolume)',text)
-            self.assertIn('!recording, !requesting, headphones',text)
-        check(app)
+        def check(a, r):
+            # Explicit device, explicit channel, direct HAL data: no AVAudioEngine capture/bus format.
+            self.assertIn('HALCapture(device: d, channel: selectedChannel, session: s)',a)
+            self.assertIn('ProbeGuard.difference(from: base, to: ProbeInput.snapshot(d.deviceID))',a)
+            self.assertIn('ProbeGuard.captureProblem(snapshot, channel: selectedChannel)',a)
+            self.assertIn('stop(discard: true, reason: "Cambio de ruta/formato real:',a)
+            self.assertNotIn('installTap',a)
+            self.assertIn('AudioDeviceCreateIOProcIDWithBlock(&created, device.deviceID, nil, block)',r)
+            self.assertIn('np_push_strided_timed(handle',r)
+            self.assertIn('channel - first, sampleTime',r)
+            self.assertIn('p.volume = Float(listenVolume)',a)
+            self.assertIn('(0...1).contains(listenVolume)',a)
+            self.assertIn('!recording, !requesting, headphones',a)
+        check(app, route)
         self.assertIn('confirmedOutputUID == output.id',app)
         self.assertIn('probe.confirmHeadphones(enabled)',app)
         self.assertIn('stopPlayback()\n        requesting = true',app)
         self.assertIn('Slider(value: $probe.listenVolume, in: 0...1',app)
         self.assertIn('Slider(value: $probe.copyGainDB, in: 0...24',app)
         self.assertIn('Slider(value: $probe.filterMix, in: 0...0.25',app)
-        with self.assertRaises(AssertionError): check(app.replace('buffer.floatChannelData?[selectedChannel]','buffer.floatChannelData?[0]'))
+        # Guards still present in both layers (polling and HAL notification re-check).
+        self.assertEqual(app.count('ProbeGuard.difference(from: base'), 2)
+        self.assertIn('hal?.stop(); hal = nil',app)
+        with self.assertRaises(AssertionError): check(app, route.replace('channel - first, sampleTime','0, sampleTime'))
+        with self.assertRaises(AssertionError): check(app.replace('ProbeGuard.difference(from: base, to: ProbeInput.snapshot(d.deviceID))','nil'), route)
         self.assertNotIn('AudioObjectSetPropertyData',route)
         self.assertIn('AudioUnitGetProperty',route)
         self.assertIn('kAudioDeviceTransportTypeVirtual',route)

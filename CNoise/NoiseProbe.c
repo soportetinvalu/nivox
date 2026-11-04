@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sched.h>
 #define QUEUE 16384u
+#define SCRATCH 4096u
 _Static_assert((int)NP_DELAY == (int)CN_LATENCY, "SpeexDSP delay mismatch");
 struct np_session {
     cn_engine *engine;
@@ -16,6 +17,8 @@ struct np_session {
     int finished;
     int timed;
     int64_t next_sample_time;
+    atomic_size_t blocks;
+    float scratch[SCRATCH];
     float queue[QUEUE];
     float *raw, *wet;
 };
@@ -25,8 +28,9 @@ np_session *np_create(unsigned rate, unsigned channels, size_t max_frames) {
     if (!s) return NULL;
     atomic_init(&s->read,0); atomic_init(&s->written,0);
     atomic_init(&s->active,0); atomic_init(&s->accepting,1); atomic_init(&s->error,0);
+    atomic_init(&s->blocks,0);
     if (!atomic_is_lock_free(&s->read) || !atomic_is_lock_free(&s->written) ||
-        !atomic_is_lock_free(&s->active) || !atomic_is_lock_free(&s->accepting) ||
+        !atomic_is_lock_free(&s->active) || !atomic_is_lock_free(&s->blocks) || !atomic_is_lock_free(&s->accepting) ||
         !atomic_is_lock_free(&s->error)) { free(s); return NULL; }
     s->max=max_frames;
     s->raw=calloc(max_frames,sizeof(float));
@@ -71,6 +75,30 @@ int np_push(np_session *s,const float *input,size_t count) { return push(s,input
 int np_push_timed(np_session *s,const float *input,size_t count,int64_t sample_time) {
     return push(s,input,count,1,sample_time);
 }
+/* HAL/IOProc producer: copy one channel out of a strided Float32 block into
+ * session-owned scratch (no allocation) and push it with the device sample time.
+ * Same single-producer contract as np_push_timed. Malformed layout is sticky. */
+int np_push_strided_timed(np_session *s,const float *base,size_t frames,size_t stride,size_t offset,int64_t sample_time) {
+    if (!s) return NP_INVALID;
+    if (!base || !stride || stride>1024 || offset>=stride || frames>(size_t)INT32_MAX) {
+        atomic_store(&s->error,NP_INVALID); return NP_INVALID;
+    }
+    atomic_fetch_add(&s->blocks,1);
+    size_t done=0; int rc=NP_OK;
+    while (done<frames) {
+        if (sample_time>0 && done>(size_t)(INT64_MAX-sample_time)) {
+            atomic_store(&s->error,NP_INVALID); return NP_INVALID;
+        }
+        size_t n=frames-done<SCRATCH ? frames-done : SCRATCH;
+        const float *p=base+done*stride+offset;
+        for (size_t i=0;i<n;i++) s->scratch[i]=p[i*stride];
+        rc=push(s,s->scratch,n,1,sample_time+(int64_t)done);
+        if (rc) break;
+        done+=n;
+    }
+    return rc;
+}
+size_t np_blocks(const np_session *s) { return s ? atomic_load(&s->blocks) : 0; }
 int np_pump(np_session *s) {
     if (!s || s->finished) return NP_INVALID;
     int error=atomic_load(&s->error); if (error) return error;

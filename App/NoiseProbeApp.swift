@@ -12,21 +12,6 @@ enum ProbeBuild {
     static let instructions = "Elige micrófono físico y canal. Graba hasta 15 s y compara original/filtrado. Solo 48 kHz; sin monitorización ni cambios globales."
 }
 
-final class CaptureSession: @unchecked Sendable {
-    let handle: OpaquePointer
-    init() throws {
-        guard let p = np_create(48000, 1, 720000) else {
-            throw ProbeError.message("No se pudo crear SpeexDSP / cola lock-free.")
-        }
-        handle = p
-    }
-    deinit { np_destroy(handle) }
-}
-enum ProbeError: LocalizedError {
-    case message(String)
-    var errorDescription: String? { if case let .message(s) = self { return s }; return nil }
-}
-
 @MainActor final class AudioProbe: ObservableObject {
     @Published var status = "Prueba experimental local. Nada se graba al abrir."
     @Published var recording = false
@@ -42,17 +27,19 @@ enum ProbeError: LocalizedError {
     @Published var listenVolume = 0.35
     @Published private(set) var levelsText = ""
     @Published private(set) var capturedRoute = ""
+    @Published private(set) var diagnostics = ""
+    private var diagnosticLines: [String] = []
     private var capturedDevice: ProbeInputDevice?
+    private var baseline: ProbeDeviceSnapshot?
+    private var hal: HALCapture?
     private var confirmedOutputUID: String?
     private var preparedRaw: [Float] = []
     private var preparedClean: [Float] = []
     var selectedDevice: ProbeInputDevice? { devices.first { $0.id == microphone } }
-    private var engine: AVAudioEngine?
     private var session: CaptureSession?
     private let worker = DispatchQueue(label: "local.nivox.dsp", qos: .userInitiated)
     private var pump: DispatchSourceTimer?
     private var ticker: Timer?
-    private var routeObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
     private var startTime = ProcessInfo.processInfo.systemUptime
     private var raw: [Float] = []
@@ -61,6 +48,7 @@ enum ProbeError: LocalizedError {
     private var player: AVAudioPlayerNode?
     private var playbackObserver: NSObjectProtocol?
     private var permissionGeneration: UInt64 = 0
+    private var firstBlockSeen = false
 
     init() {
         refreshInputs()
@@ -104,74 +92,86 @@ enum ProbeError: LocalizedError {
             status = "Micrófono denegado/restringido. Revisar Privacidad y seguridad; no se elude TCC."
         }
     }
+    /// Timeline kept for this take only, in RAM; no audio content. Shown and copyable.
+    private func note(_ text: String) {
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - startTime)
+        diagnosticLines.append(String(format: "+%.2f s ", elapsed) + text)
+        if diagnosticLines.count > 40 { diagnosticLines.removeFirst(diagnosticLines.count - 40) }
+        diagnostics = diagnosticLines.joined(separator: "\n")
+    }
+    func copyDiagnostics() {
+        guard !diagnostics.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics, forType: .string)
+    }
     private func beginCapture() {
+        startTime = ProcessInfo.processInfo.systemUptime
+        diagnosticLines = []; diagnostics = ""
         do {
-            let e = AVAudioEngine()
-            let input = e.inputNode
             guard let choice = selectedDevice, let d = ProbeInput.device(choice.deviceID),
-                  d.id == choice.id, channel >= 0, channel < d.channels else {
+                  d.id == choice.id, channel >= 0, channel < d.channels,
+                  let snapshot = ProbeInput.snapshot(d.deviceID), snapshot.uid == d.id else {
                 throw ProbeError.message("Entrada no disponible: actualiza y selecciona micrófono/canal.")
             }
-            try ProbeInput.bind(input, to: d, input: true)
-            let f = input.outputFormat(forBus: 0)
             let selectedChannel = channel
-            guard f.sampleRate == 48000, Int(f.channelCount) > selectedChannel,
-                  f.commonFormat == .pcmFormatFloat32, !f.isInterleaved else {
-                throw ProbeError.message("Entrada no compatible: \(f). Esta fase exige Float32 no intercalado a 48 kHz. No cambia el dispositivo ni su tasa.")
+            if let problem = ProbeGuard.captureProblem(snapshot, channel: selectedChannel) {
+                throw ProbeError.message("Entrada no compatible: \(problem). No cambia el dispositivo ni su tasa.")
             }
             let s = try CaptureSession()
             raw = []; clean = []; hasAudio = false; seconds = 0
-            preparedRaw = []; preparedClean = []; levelsText = ""
-            capturedDevice = d
-            capturedRoute = "\(d.name) · UID \(d.id) · canal \(selectedChannel + 1) · bus \(Int(f.sampleRate)) Hz / \(f.channelCount) canales · HAL \(Int(d.rate)) Hz"
-            engine = e; session = s
-            // Only bounded copy/validation in C here: no DSP, file I/O, UI or dispatch.
-            input.installTap(onBus: 0, bufferSize: 1024, format: f) { buffer, time in
-                guard buffer.format.sampleRate == 48000,
-                      buffer.format.commonFormat == .pcmFormatFloat32,
-                      !buffer.format.isInterleaved,
-                      Int(buffer.format.channelCount) > selectedChannel,
-                      time.isSampleTimeValid, time.sampleRate == 48000,
-                      let channel = buffer.floatChannelData?[selectedChannel] else {
-                    np_abort(s.handle); return
-                }
-                _ = np_push_timed(s.handle, channel, Int(buffer.frameLength), time.sampleTime)
-            }
-            routeObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: e, queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.stop(discard: true, reason: "Cambio de ruta/formato: captura descartada. Iniciar otra prueba.")
-                }
-            }
+            preparedRaw = []; preparedClean = []; levelsText = ""; firstBlockSeen = false
+            capturedDevice = d; baseline = snapshot
+            capturedRoute = "\(d.name) · UID \(d.id) · canal \(selectedChannel + 1) · captura directa HAL · \(snapshot.text)"
+            note("inicio: \(capturedRoute)")
+            session = s
+            let h = HALCapture(device: d, channel: selectedChannel, session: s)
+            hal = h
             let timer = DispatchSource.makeTimerSource(queue: worker)
             timer.schedule(deadline: .now(), repeating: .milliseconds(5))
             timer.setEventHandler { _ = np_pump(s.handle) }
             pump = timer; timer.resume()
-            e.prepare()
-            try e.start()
+            try h.start { [weak self] in
+                Task { @MainActor in self?.verifyAfterHALNotification() }
+            }
             recording = true; startTime = ProcessInfo.processInfo.systemUptime
+            note("AudioDeviceStart correcto; esperando el primer bloque del dispositivo")
             status = "Capturando \(d.name), canal \(selectedChannel + 1), 48 kHz; máximo 15 s. Sin monitorización."
             ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.tick() }
             }
         } catch {
+            note("no se pudo iniciar: \(error.localizedDescription)")
             stop(discard: true)
             status = error.localizedDescription
         }
     }
+    /// A HAL notification is not a verdict: re-read the real state and compare.
+    private func verifyAfterHALNotification() {
+        guard recording, let d = capturedDevice, let base = baseline else { return }
+        if let why = ProbeGuard.difference(from: base, to: ProbeInput.snapshot(d.deviceID)) {
+            stop(discard: true, reason: "Cambio de ruta/formato real: \(why). Captura descartada; no se usa otro micrófono. Iniciar otra prueba.")
+        } else {
+            note("notificación HAL verificada: mismo UID, tasa, canales y formato; la captura continúa")
+        }
+    }
     private func tick() {
         guard let s = session, recording else { return }
-        guard let d = capturedDevice,
-              let current = ProbeInput.device(d.deviceID), current.id == d.id,
-              current.rate == d.rate, current.channels == d.channels else {
-            stop(discard: true, reason: "Entrada desconectada o cambiada: toma descartada. No se usa otro micrófono."); return
+        guard let d = capturedDevice, let base = baseline else { return }
+        if let why = ProbeGuard.difference(from: base, to: ProbeInput.snapshot(d.deviceID)) {
+            stop(discard: true, reason: "Entrada desconectada o cambiada: \(why). Toma descartada. No se usa otro micrófono."); return
         }
         seconds = Double(np_received(s.handle)) / 48000
+        if np_blocks(s.handle) > 0 && !firstBlockSeen {
+            firstBlockSeen = true
+            note("primer bloque recibido; muestras acumuladas \(np_received(s.handle))")
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - startTime
         if np_error(s.handle) != 0 {
-            stop(discard: true, reason: "Captura inválida (discontinuidad temporal, cola llena, muestras fuera de rango o cambio de formato). No se ofrece audio incompleto.")
+            stop(discard: true, reason: "Captura inválida (discontinuidad temporal, cola llena, muestras fuera de rango o disposición de buffers inesperada). No se ofrece audio incompleto.")
         } else if np_received(s.handle) >= 720000 { stop() }
-        else if ProcessInfo.processInfo.systemUptime - startTime > 18 {
+        else if np_blocks(s.handle) == 0 && elapsed > 3 {
+            stop(discard: true, reason: "El dispositivo no entregó ningún bloque de audio en 3 s tras AudioDeviceStart. Captura descartada; no se usa otro micrófono.")
+        } else if elapsed > 18 {
             stop(discard: true, reason: "Tiempo de espera/cortes de captura. Grabación descartada.")
         }
     }
@@ -179,11 +179,11 @@ enum ProbeError: LocalizedError {
         permissionGeneration &+= 1
         requesting = false // an outstanding TCC reply must not restart after window close/sleep
         ticker?.invalidate(); ticker = nil
-        if let observer = routeObserver { NotificationCenter.default.removeObserver(observer) }
-        routeObserver = nil
-        if let s = session { np_close(s.handle) }
-        engine?.stop()
-        if engine != nil { engine?.inputNode.removeTap(onBus: 0) }
+        hal?.stop(); hal = nil // no IOProc call can be in flight after this line
+        if let s = session {
+            note("fin: bloques \(np_blocks(s.handle)) · muestras \(np_received(s.handle)) · error C \(np_error(s.handle)) · \(discard ? "descartada" : "conservada")\(reason.map { " · motivo: " + $0 } ?? "")")
+            np_close(s.handle)
+        }
         pump?.cancel(); pump = nil
         var result: Int32 = -1
         if let s = session {
@@ -197,7 +197,7 @@ enum ProbeError: LocalizedError {
                 raw = []; clean = []; hasAudio = false
             }
         }
-        engine = nil; session = nil; recording = false; capturedDevice = nil
+        session = nil; recording = false; capturedDevice = nil; baseline = nil
         if hasAudio { preparePair() }
         else { preparedRaw = []; preparedClean = []; levelsText = "" }
         if let reason = reason { status = reason }
@@ -399,6 +399,12 @@ struct NivoxContent: View {
                     Text(String(format: "%.1f / 15 s", probe.seconds)).monospacedDigit()
                 }
                 Text(probe.capturedRoute).font(.caption).textSelection(.enabled)
+                if !probe.diagnostics.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(probe.diagnostics).font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
+                        Button("Copiar diagnóstico de esta toma") { probe.copyDiagnostics() }
+                    }
+                }
                 VStack(alignment: .leading) {
                     HStack {
                         Text(String(format: "Ganancia de copias A/B: +%.0f dB", probe.copyGainDB))
