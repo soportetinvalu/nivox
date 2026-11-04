@@ -162,8 +162,12 @@ class Tests(unittest.TestCase):
         channels = load_wav(path)['samples']
         raw1, _ = capture(channels[0])
         raw2, _ = capture(channels[1])
-        self.assertEqual(raw1, channels[0])
-        self.assertEqual(raw2, channels[1])
+        # Keep the exact sample oracle without unittest's quadratic list diff
+        # on intentional 48,000-sample failures (notably Python 3.12).
+        def assert_raw_exact(actual, expected):
+            self.assertTrue(actual == expected, 'raw sample identity mismatch')
+        assert_raw_exact(raw1, channels[0])
+        assert_raw_exact(raw2, channels[1])
         self.assertGreater(max(abs(a-b) for a,b in zip(raw1, raw2)), .2)
         METRICS['channel_example'] = {'frames': n, 'original_uses_channel': 1, 'other_signal_on_channel': 2,
                                       'channel1': channel_metrics(raw1, 48000), 'channel2': channel_metrics(raw2, 48000)}
@@ -171,7 +175,7 @@ class Tests(unittest.TestCase):
         rejected = []
         for name, broken in [('muted', [0.0]*n), ('wrong_channel', raw2)]:
             try:
-                self.assertEqual(broken, channels[0])
+                assert_raw_exact(broken, channels[0])
             except AssertionError:
                 rejected.append(name)
         self.assertEqual(rejected, ['muted', 'wrong_channel'])
