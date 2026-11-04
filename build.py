@@ -111,9 +111,13 @@ def main():
               'input_hashes': {str(p.relative_to(HERE)): digest(p)
                                for p in [Path(__file__).resolve(), HERE / 'src/speex_noise.c',
                                          HERE / 'CNoise/NoiseProbe.c', HERE / 'CNoise/include/NoiseProbe.h',
+                                         HERE / 'CNoise/ProbeLevels.c', HERE / 'App/ProbeInput.swift',
+                                         HERE / 'tests/test_ab_levels.py',
                                          HERE / 'include/christian_noise.h', HERE / 'tests/stream_test.c',
                                          HERE / 'tests/test_engine.py', HERE / 'tests/test_integration.py',
-                                         HERE / 'python/christian_noise.py', HERE / 'ci/FrameworkSmoke.swift',
+                                         HERE / 'python/christian_noise.py', HERE / 'python/ab_wav.py',
+                                         HERE / 'python/diagnose_ab.py', HERE / 'tests/test_ab_diagnosis.py',
+                                         HERE / 'ci/FrameworkSmoke.swift',
                                          HERE / 'App/NoiseProbeApp.swift', HERE / 'App/Info.plist',
                                          HERE / 'App/Entitlements.plist', HERE / 'App/Assets/Nivox.icns',
                                          HERE / 'App/Assets/Nivox-original.png', HERE / 'App/Assets/icon-manifest.json',
@@ -154,7 +158,7 @@ def main():
                       '-I' + str(source / 'include'), '-I' + str(upstream / 'include/speex')]
             report['call_control_tests'] = json.loads(test_control(run, out, cc, flags).splitlines()[-1])
             objects = []
-            for src in [HERE / 'src/speex_noise.c', HERE / 'CNoise/NoiseProbe.c']:
+            for src in [HERE / 'src/speex_noise.c', HERE / 'CNoise/NoiseProbe.c', HERE / 'CNoise/ProbeLevels.c']:
                 obj = out / (src.stem + '.o')
                 run([cc, *common, '-c', src, '-o', obj])
                 objects.append(obj)
@@ -175,6 +179,12 @@ def main():
                 report['unit_tests'] = json.loads((out / 'unit-tests.json').read_text())
                 run([sys.executable, HERE / 'tests/test_integration.py', '--library', lib, '--out', out / 'integration'])
                 report['integration_tests'] = json.loads((out / 'integration/report.json').read_text())
+                run([sys.executable, HERE / 'tests/test_ab_diagnosis.py', '--library', lib,
+                     '--out', out / 'ab-diagnosis'])
+                report['ab_diagnosis_tests'] = json.loads((out / 'ab-diagnosis/report.json').read_text())
+                run([sys.executable, HERE / 'tests/test_ab_levels.py', '--library', lib,
+                     '--out', out / 'ab-levels.json'])
+                report['ab_levels_tests'] = json.loads((out / 'ab-levels.json').read_text())
             if mac:
                 swift_flags = [swift, '-swift-version', '5', '-parse-as-library', '-O',
                                '-module-name', 'NivoxSpeexApp', '-target', 'arm64-apple-macos13.0', '-sdk', sdk,
@@ -198,7 +208,7 @@ def main():
                     raise RuntimeError('Bundled icon differs from original branding')
                 call_library = build_app_library(run, out, cc, common)
                 run([*swift_flags, '-I', HERE / 'callaudio/control',
-                     HERE / 'App/NoiseProbeApp.swift', HERE / 'App/CallAudio.swift',
+                     HERE / 'App/NoiseProbeApp.swift', HERE / 'App/ProbeInput.swift', HERE / 'App/CallAudio.swift',
                      call_library, own, speex, '-framework', 'CoreAudio', '-framework', 'AudioToolbox',
                      '-framework', 'CoreFoundation', '-framework', 'SwiftUI', '-framework', 'AppKit',
                      '-framework', 'AVFoundation', '-o', exe])

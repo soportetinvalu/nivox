@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI WAV PCM16 mono/48 kHz; biblioteca local sin dependencias Python externas."""
+"""CLI WAV PCM16/Float32 mono/48 kHz; salida PCM16, sin conversión de tasa/canales."""
 import argparse, array, ctypes, json, math, platform, sys, time, wave
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -38,14 +38,14 @@ class Engine:
         for i in range(0,len(padded),block): out.extend(self.process(padded[i:i+block]))
         return out[self.latency:self.latency+len(samples)]
 def read_wav(path):
-    with wave.open(str(path),'rb') as f:
-        if f.getnchannels()!=1 or f.getframerate()!=RATE or f.getsampwidth()!=2 or f.getcomptype()!='NONE':
-            raise ValueError('Expected WAV PCM16, mono, 48000 Hz; convert explicitly with ffmpeg')
-        raw=f.readframes(f.getnframes()); expected=f.getnframes()*2
-        if len(raw)!=expected: raise ValueError('Truncated WAV payload')
-    data=array.array('h'); data.frombytes(raw)
-    if sys.byteorder!='little': data.byteswap()
-    return [x/32768.0 for x in data]
+    from ab_wav import load_wav
+    wav = load_wav(path)
+    if wav['channels'] != 1 or wav['sample_rate'] != RATE:
+        raise ValueError('Expected WAV PCM16/Float32, mono, 48000 Hz; convert explicitly with ffmpeg')
+    samples = wav['samples'][0]
+    if any(abs(x) > 1 for x in samples):
+        raise ValueError('Expected finite normalized WAV samples in [-1,1]')
+    return samples
 def write_wav(path,samples):
     data=array.array('h',(max(-32768,min(32767,round(x*32768))) for x in samples))
     if sys.byteorder!='little': data.byteswap()

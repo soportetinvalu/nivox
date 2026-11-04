@@ -46,6 +46,8 @@ jobs:
             build/linux-release/stream_test
             build/linux-release/unit-tests.json
             build/linux-release/integration/report.json
+            build/linux-release/ab-levels.json
+            build/linux-release/ab-diagnosis/report.json
             build/linux-sanitize/report.json
             build/linux-sanitize/commands.log
             build/linux-sanitize/SHA256SUMS
@@ -82,6 +84,8 @@ jobs:
             build/mac-arm64/stream_test
             build/mac-arm64/unit-tests.json
             build/mac-arm64/integration/report.json
+            build/mac-arm64/ab-levels.json
+            build/mac-arm64/ab-diagnosis/report.json
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: false

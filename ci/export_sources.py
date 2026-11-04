@@ -13,10 +13,12 @@ HERE = Path(__file__).resolve().parents[1]
 FILES = [
     '.gitignore', '.github/workflows/build-speex-arm64.yml', 'build.py', 'README.md', 'LICENSE', 'LICENSES.md',
     'src/speex_noise.c', 'include/christian_noise.h', 'CNoise/NoiseProbe.c',
+    'CNoise/ProbeLevels.c', 'App/ProbeInput.swift', 'tests/test_ab_levels.py', 'docs/AB_RUTA_SEGURA.md',
     'CNoise/include/NoiseProbe.h', 'CNoise/include/module.modulemap',
     'App/NoiseProbeApp.swift', 'App/Info.plist', 'App/Entitlements.plist',
     'App/Assets/Nivox-original.png', 'App/Assets/Nivox.icns', 'App/Assets/icon-manifest.json',
-    'App/Assets/BRANDING.md', 'python/christian_noise.py',
+    'App/Assets/BRANDING.md', 'python/christian_noise.py', 'python/ab_wav.py', 'python/diagnose_ab.py',
+    'tests/test_ab_diagnosis.py', 'docs/AB_DIAGNOSTICO.md',
     'tests/stream_test.c', 'tests/test_engine.py', 'tests/test_integration.py', 'tests/test_delivery.py',
     'ci/FrameworkSmoke.swift', 'ci/icon_assets.py', 'ci/export_sources.py',
     'vendor/speexdsp-1.2.1.tar.gz', 'docs/RESULTADOS.md', 'docs/ACEPTACION_MAC.md', 'docs/INTEGRACION.md',

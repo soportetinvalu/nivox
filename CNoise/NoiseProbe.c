@@ -14,6 +14,8 @@ struct np_session {
     atomic_int accepting, active, error;
     size_t max, processed;
     int finished;
+    int timed;
+    int64_t next_sample_time;
     float queue[QUEUE];
     float *raw, *wet;
 };
@@ -42,12 +44,17 @@ void np_destroy(np_session *s) {
     if (!s) return;
     np_close(s); cn_destroy(s->engine); free(s->raw); free(s->wet); free(s);
 }
-int np_push(np_session *s,const float *input,size_t count) {
+static int push(np_session *s,const float *input,size_t count,int timed,int64_t sample_time) {
     if (!s || (count && !input)) return NP_INVALID;
     atomic_store(&s->active,1); /* exactly one producer, never two taps */
     int rc=NP_OK;
     if (!atomic_load(&s->accepting)) { rc=NP_CLOSED; goto done; }
     rc=atomic_load(&s->error); if (rc) goto done;
+    if (timed && (count > INT64_MAX || sample_time > INT64_MAX-(int64_t)count ||
+                  (s->timed && sample_time != s->next_sample_time))) {
+        rc=NP_INVALID; atomic_store(&s->error,rc); goto done;
+    }
+    if (timed) { s->timed=1; s->next_sample_time=sample_time+(int64_t)count; }
     size_t w=atomic_load(&s->written), r=atomic_load(&s->read);
     size_t n=count < s->max-w ? count : s->max-w;
     if (n > QUEUE-(w-r)) { rc=NP_OVERFLOW; atomic_store(&s->error,rc); goto done; }
@@ -59,6 +66,10 @@ int np_push(np_session *s,const float *input,size_t count) {
     rc=w+n==s->max ? NP_LIMIT : NP_OK;
 done:
     atomic_store(&s->active,0); return rc;
+}
+int np_push(np_session *s,const float *input,size_t count) { return push(s,input,count,0,0); }
+int np_push_timed(np_session *s,const float *input,size_t count,int64_t sample_time) {
+    return push(s,input,count,1,sample_time);
 }
 int np_pump(np_session *s) {
     if (!s || s->finished) return NP_INVALID;

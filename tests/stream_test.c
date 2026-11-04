@@ -28,7 +28,7 @@ static void *producer(void *ignored) {
         while(atomic_load(&turn)!=0) sched_yield();
         size_t n=total-pos; if(n>127) n=127;
         for(size_t i=0;i<n;i++) x[i]=signal_at(pos+i);
-        int rc=np_push(shared,x,n); assert(rc==NP_OK || rc==NP_LIMIT);
+        int rc=np_push_timed(shared,x,n,(int64_t)pos); assert(rc==NP_OK || rc==NP_LIMIT);
         pos+=n; atomic_store(&turn,1);
     }
     return NULL;
@@ -50,7 +50,7 @@ int main(void) {
 #ifdef WRAP_ALLOC
     atomic_store(&tracking,1);
 #endif
-    assert(np_push(s,x,1000)==NP_LIMIT); assert(np_pump(s)==NP_OK);
+    assert(np_push_timed(s,x,1000,0)==NP_LIMIT); assert(np_pump(s)==NP_OK);
     np_close(s); assert(np_finish(s)==NP_OK);
 #ifdef WRAP_ALLOC
     atomic_store(&tracking,0); assert(atomic_load(&allocations)==0);
@@ -65,6 +65,20 @@ int main(void) {
     s=np_create(48000,1,10); assert(s); x[0]=NAN;
     assert(np_push(s,x,1)==NP_INVALID); assert(np_received(s)==0);
     np_close(s); assert(np_finish(s)==NP_INVALID); np_destroy(s);
+    s=np_create(48000,1,1000); assert(s); x[0]=0;
+    assert(np_push_timed(s,x,100,12345)==NP_OK);
+    assert(np_push_timed(s,x,100,12445)==NP_OK);
+    assert(np_push_timed(s,x,100,12546)==NP_INVALID);
+    assert(np_push_timed(s,x,100,12545)==NP_INVALID);
+    np_close(s); assert(np_finish(s)==NP_INVALID); np_destroy(s);
+    float dry[4]={.9f,-.3f,0,.01f}, wet[4]={0}, a[4], b[4];
+    np_ab_levels levels;
+    assert(np_prepare_ab(dry,wet,4,24,.25,a,b,&levels)==NP_OK);
+    assert(levels.gain_limited && !levels.bypassed);
+    for(size_t i=0;i<4;i++) { assert(fabs(a[i])<=.891251); assert(fabs(b[i]-.75f*a[i])<1e-6); }
+    assert(np_prepare_ab(dry,wet,4,25,.25,a,b,&levels)==NP_INVALID);
+    wet[0]=NAN;
+    assert(np_prepare_ab(dry,wet,4,0,.25,a,b,&levels)==NP_INVALID);
     shared=np_create(48000,1,total); assert(shared);
     pthread_t p,c; assert(!pthread_create(&p,NULL,producer,NULL)); assert(!pthread_create(&c,NULL,consumer,NULL));
     assert(!pthread_join(p,NULL)); assert(!pthread_join(c,NULL));
@@ -72,7 +86,7 @@ int main(void) {
     const float *raw=np_raw(shared), *clean=np_clean(shared);
     for(size_t i=0;i<total;i++) { assert(raw[i]==signal_at(i)); assert(isfinite(clean[i]) && fabsf(clean[i])<=1.f); }
     np_destroy(shared);
-    puts("{\"native_assertions\":\"passed\",\"concurrent_frames\":240000,\"allocation_wrapping\":"
+    puts("{\"native_assertions\":\"passed\",\"timed_capture_and_levels\":true,\"concurrent_frames\":240000,\"allocation_wrapping\":"
 #ifdef WRAP_ALLOC
          "true,\"callback_worker_allocations\":0}"
 #else

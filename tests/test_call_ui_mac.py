@@ -96,7 +96,7 @@ def main():
     out.mkdir(parents=True)
     report = {'ok': False, 'scope': 'production call view and tabbed root hosted in test process + real HAL + pixel OCR; not packaged app launch or click automation',
               'driver': args.driver, 'commands': [], 'input_hashes': {}}
-    for name in ['App/NoiseProbeApp.swift', 'App/CallAudio.swift', 'ci/CallAudioUISmoke.swift',
+    for name in ['App/NoiseProbeApp.swift', 'App/ProbeInput.swift', 'App/CallAudio.swift', 'ci/CallAudioUISmoke.swift',
                  'tests/test_call_ui_mac.py', 'tests/fixtures/call-ui-transparent-41701415863.png']:
         report['input_hashes'][name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
     # Preserve every production declaration/body; only relocate the entry point.
@@ -174,7 +174,7 @@ def main():
             def compile_view(view_source, executable):
                 run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '-Onone',
                  '-target', 'arm64-apple-macos13.0', '-sdk', sdk, '-I', ROOT / 'CNoise/include',
-                 '-I', ROOT / 'callaudio/control', generated, view_source,
+                 '-I', ROOT / 'callaudio/control', generated, ROOT / 'App/ProbeInput.swift', view_source,
                  ROOT / 'ci/CallAudioUISmoke.swift', *libs,
                  '-framework', 'CoreAudio', '-framework', 'AudioToolbox', '-framework', 'CoreFoundation',
                  '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation',

@@ -7,9 +7,9 @@ import NivoxCallAudio
 
 enum ProbeBuild {
     static let canCapture = true
-    static let subtitle = "SpeexDSP 1.2.1 · supresión −15 dB · sin pesos · experimental"
+    static let subtitle = "SpeexDSP 1.2.1 · mezcla suave 0–25 % · sin aislamiento de voz · experimental"
     static let windowTitle = "Nivox · audio local"
-    static let instructions = "Graba hasta 15 segundos y compara original/limpio. Solo 48 kHz; canal 1. No crea un micrófono virtual ni modifica dispositivos."
+    static let instructions = "Elige micrófono físico y canal. Graba hasta 15 s y compara original/filtrado. Solo 48 kHz; sin monitorización ni cambios globales."
 }
 
 final class CaptureSession: @unchecked Sendable {
@@ -34,6 +34,19 @@ enum ProbeError: LocalizedError {
     @Published var seconds = 0.0
     @Published var hasAudio = false
     @Published var headphones = false
+    @Published var microphone = ""
+    @Published var channel = 0
+    @Published private(set) var devices: [ProbeInputDevice] = []
+    @Published var copyGainDB = 0.0
+    @Published var filterMix = 0.25
+    @Published var listenVolume = 0.35
+    @Published private(set) var levelsText = ""
+    @Published private(set) var capturedRoute = ""
+    private var capturedDevice: ProbeInputDevice?
+    private var confirmedOutputUID: String?
+    private var preparedRaw: [Float] = []
+    private var preparedClean: [Float] = []
+    var selectedDevice: ProbeInputDevice? { devices.first { $0.id == microphone } }
     private var engine: AVAudioEngine?
     private var session: CaptureSession?
     private let worker = DispatchQueue(label: "local.nivox.dsp", qos: .userInitiated)
@@ -50,6 +63,7 @@ enum ProbeError: LocalizedError {
     private var permissionGeneration: UInt64 = 0
 
     init() {
+        refreshInputs()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -59,8 +73,16 @@ enum ProbeError: LocalizedError {
             }
         }
     }
+    func refreshInputs() {
+        guard !recording, !requesting else { return }
+        devices = ProbeInput.devices()
+        if selectedDevice == nil { microphone = ""; channel = 0 }
+    }
     func start() {
         guard !recording && !requesting else { return }
+        guard let d = selectedDevice, channel >= 0, channel < d.channels else {
+            status = "Selecciona explícitamente un micrófono físico y su canal."; return
+        }
         permissionGeneration &+= 1
         let token = permissionGeneration
         stopPlayback()
@@ -86,23 +108,34 @@ enum ProbeError: LocalizedError {
         do {
             let e = AVAudioEngine()
             let input = e.inputNode
+            guard let choice = selectedDevice, let d = ProbeInput.device(choice.deviceID),
+                  d.id == choice.id, channel >= 0, channel < d.channels else {
+                throw ProbeError.message("Entrada no disponible: actualiza y selecciona micrófono/canal.")
+            }
+            try ProbeInput.bind(input, to: d, input: true)
             let f = input.outputFormat(forBus: 0)
-            guard f.sampleRate == 48000, f.channelCount >= 1,
+            let selectedChannel = channel
+            guard f.sampleRate == 48000, Int(f.channelCount) > selectedChannel,
                   f.commonFormat == .pcmFormatFloat32, !f.isInterleaved else {
                 throw ProbeError.message("Entrada no compatible: \(f). Esta fase exige Float32 no intercalado a 48 kHz. No cambia el dispositivo ni su tasa.")
             }
             let s = try CaptureSession()
             raw = []; clean = []; hasAudio = false; seconds = 0
+            preparedRaw = []; preparedClean = []; levelsText = ""
+            capturedDevice = d
+            capturedRoute = "\(d.name) · UID \(d.id) · canal \(selectedChannel + 1) · bus \(Int(f.sampleRate)) Hz / \(f.channelCount) canales · HAL \(Int(d.rate)) Hz"
             engine = e; session = s
             // Only bounded copy/validation in C here: no DSP, file I/O, UI or dispatch.
-            input.installTap(onBus: 0, bufferSize: 1024, format: f) { buffer, _ in
+            input.installTap(onBus: 0, bufferSize: 1024, format: f) { buffer, time in
                 guard buffer.format.sampleRate == 48000,
                       buffer.format.commonFormat == .pcmFormatFloat32,
                       !buffer.format.isInterleaved,
-                      let channel = buffer.floatChannelData?[0] else {
+                      Int(buffer.format.channelCount) > selectedChannel,
+                      time.isSampleTimeValid, time.sampleRate == 48000,
+                      let channel = buffer.floatChannelData?[selectedChannel] else {
                     np_abort(s.handle); return
                 }
-                _ = np_push(s.handle, channel, Int(buffer.frameLength))
+                _ = np_push_timed(s.handle, channel, Int(buffer.frameLength), time.sampleTime)
             }
             routeObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: e, queue: .main
@@ -118,7 +151,7 @@ enum ProbeError: LocalizedError {
             e.prepare()
             try e.start()
             recording = true; startTime = ProcessInfo.processInfo.systemUptime
-            status = "Capturando entrada predeterminada, canal 1, 48 kHz; máximo 15 s. Sin monitorización."
+            status = "Capturando \(d.name), canal \(selectedChannel + 1), 48 kHz; máximo 15 s. Sin monitorización."
             ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.tick() }
             }
@@ -129,9 +162,14 @@ enum ProbeError: LocalizedError {
     }
     private func tick() {
         guard let s = session, recording else { return }
+        guard let d = capturedDevice,
+              let current = ProbeInput.device(d.deviceID), current.id == d.id,
+              current.rate == d.rate, current.channels == d.channels else {
+            stop(discard: true, reason: "Entrada desconectada o cambiada: toma descartada. No se usa otro micrófono."); return
+        }
         seconds = Double(np_received(s.handle)) / 48000
         if np_error(s.handle) != 0 {
-            stop(discard: true, reason: "Captura inválida (cola llena, muestras fuera de rango o cambio de formato). No se ofrece audio incompleto.")
+            stop(discard: true, reason: "Captura inválida (discontinuidad temporal, cola llena, muestras fuera de rango o cambio de formato). No se ofrece audio incompleto.")
         } else if np_received(s.handle) >= 720000 { stop() }
         else if ProcessInfo.processInfo.systemUptime - startTime > 18 {
             stop(discard: true, reason: "Tiempo de espera/cortes de captura. Grabación descartada.")
@@ -159,10 +197,12 @@ enum ProbeError: LocalizedError {
                 raw = []; clean = []; hasAudio = false
             }
         }
-        engine = nil; session = nil; recording = false
+        engine = nil; session = nil; recording = false; capturedDevice = nil
+        if hasAudio { preparePair() }
+        else { preparedRaw = []; preparedClean = []; levelsText = "" }
         if let reason = reason { status = reason }
         else if result == 0 {
-            status = "A/B disponible en RAM: \(String(format: "%.2f", seconds)) s. Procesado: SpeexDSP −15 dB, alineado 960 muestras; no garantiza mejora perceptual."
+            status = "A/B en RAM: \(String(format: "%.2f", seconds)) s. Filtro suave; no aísla personas ni garantiza inteligibilidad. Captura fuente sin ganancia conservada."
         } else if !discard { status = "No se obtuvo una grabación válida." }
     }
     func stopPlayback() {
@@ -170,7 +210,39 @@ enum ProbeError: LocalizedError {
         playbackObserver = nil
         player?.stop(); playback?.stop(); player = nil; playback = nil
     }
-    func play(cleaned: Bool) { playSamples(cleaned ? clean : raw) }
+    func confirmHeadphones(_ enabled: Bool) {
+        stopPlayback()
+        confirmedOutputUID = enabled ? ProbeInput.physicalOutput()?.id : nil
+        if enabled && confirmedOutputUID == nil {
+            headphones = false
+            status = "No hay salida física verificable. Selecciona auriculares antes de confirmar."
+        }
+    }
+    func preparePair() {
+        stopPlayback()
+        guard hasAudio, !recording, !requesting else { return }
+        var a = [Float](repeating: 0, count: raw.count), b = a
+        var levels = np_ab_levels()
+        let result = raw.withUnsafeBufferPointer { r in clean.withUnsafeBufferPointer { w in
+            a.withUnsafeMutableBufferPointer { ap in b.withUnsafeMutableBufferPointer { bp in
+                np_prepare_ab(r.baseAddress, w.baseAddress, raw.count, copyGainDB, filterMix,
+                              ap.baseAddress, bp.baseAddress, &levels)
+            }}
+        }}
+        guard result == 0 else {
+            preparedRaw = []; preparedClean = []
+            levelsText = "Parámetros de nivel no válidos; no se reproduce/exporta la copia."; return
+        }
+        preparedRaw = a; preparedClean = b
+        levelsText = String(format: "Captura RMS %.1f dBFS · filtro Δ %.1f dB · ganancia común aplicada %+.1f dB · pico copia %.1f dBFS.",
+                            levels.raw_rms_dbfs, levels.filtered_rms_dbfs - levels.raw_rms_dbfs,
+                            levels.applied_gain_db, levels.peak_dbfs)
+        if levels.raw_rms_dbfs < -40 { levelsText += " Entrada muy baja: comprueba canal, colocación y nivel del receptor; ganar volumen también sube ruido." }
+        if levels.full_scale_samples > 0 { levelsText += " Entrada a escala completa: posible clipping previo, no reparable con ganancia digital." }
+        if levels.gain_limited != 0 { levelsText += " Ganancia acotada por margen de pico; no se recortan muestras." }
+        if levels.bypassed != 0 { levelsText += " Filtro omitido por silencio o correlación negativa." }
+    }
+    func play(cleaned: Bool) { playSamples(cleaned ? preparedClean : preparedRaw) }
     func tone() {
         let samples = (0..<48000).map { Float(sin(2 * Double.pi * 440 * Double($0) / 48000)) * 0.05 }
         playSamples(samples)
@@ -191,8 +263,17 @@ enum ProbeError: LocalizedError {
         stopPlayback()
         do {
             let e = AVAudioEngine(), p = AVAudioPlayerNode()
+            guard let output = ProbeInput.physicalOutput() else {
+                throw ProbeError.message("Selecciona una salida física en macOS. Se rechazan salidas virtuales para evitar bucles.")
+            }
+            guard confirmedOutputUID == output.id else {
+                headphones = false
+                throw ProbeError.message("La salida cambió desde la confirmación. Revisa auriculares y volumen bajo antes de escuchar.")
+            }
+            try ProbeInput.bind(e.outputNode, to: output, input: false)
             e.attach(p); e.connect(p, to: e.mainMixerNode, format: b.format)
-            p.volume = 0.35
+            guard listenVolume.isFinite, (0...1).contains(listenVolume) else { return }
+            p.volume = Float(listenVolume)
             playback = e; player = p
             try e.start()
             playbackObserver = NotificationCenter.default.addObserver(
@@ -204,13 +285,13 @@ enum ProbeError: LocalizedError {
                 }
             }
             p.scheduleBuffer(b); p.play()
-            status = "Reproducción local a volumen inicial reducido. No se envía a ninguna llamada."
+            status = "Reproducción local por \(output.name). Volumen de app 0–100 %; no cambia volumen del sistema ni envía a llamadas."
         } catch { stopPlayback(); status = error.localizedDescription }
     }
-    func export(cleaned: Bool) {
-        guard !recording, !requesting, let b = buffer(cleaned ? clean : raw) else { return }
+    func export(cleaned: Bool, source: Bool = false) {
+        guard !recording, !requesting, let b = buffer(source ? raw : (cleaned ? preparedClean : preparedRaw)) else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = cleaned ? "prueba-limpia.wav" : "prueba-original.wav"
+        panel.nameFieldStringValue = source ? "captura-sin-ganancia.wav" : (cleaned ? "prueba-filtrada.wav" : "prueba-original.wav")
         panel.title = "Exportación explícita de audio privado; no se sube a la red"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard !FileManager.default.fileExists(atPath: url.path) else {
@@ -225,6 +306,7 @@ enum ProbeError: LocalizedError {
     func clear() {
         guard !recording, !requesting else { return }
         stopPlayback(); raw = []; clean = []; hasAudio = false; seconds = 0
+        preparedRaw = []; preparedClean = []; capturedRoute = ""; levelsText = ""
         status = "Buffers de la prueba liberados; no implica borrado seguro de memoria ni de WAV exportados."
     }
 }
@@ -297,32 +379,64 @@ struct NivoxContent: View {
         probe.stopPlayback()
     }
     private var probeView: some View {
-            VStack(alignment: .leading, spacing: 16) {
+            ScrollView { VStack(alignment: .leading, spacing: 12) {
                 Text("Nivox").font(.largeTitle.bold())
                 Text(ProbeBuild.subtitle).foregroundColor(.secondary)
                 Text(ProbeBuild.instructions)
                 HStack {
-                    Button("Grabar prueba") { probe.start() }.disabled(!ProbeBuild.canCapture || probe.recording || probe.requesting)
+                    Picker("Micrófono A/B", selection: $probe.microphone) {
+                        Text("Elegir entrada física…").tag("")
+                        ForEach(probe.devices) { d in Text("\(d.name) · \(d.channels) ch · \(Int(d.rate)) Hz").tag(d.id) }
+                    }.onChange(of: probe.microphone) { _ in probe.channel = 0 }
+                    Picker("Canal", selection: $probe.channel) {
+                        ForEach(0..<max(1, probe.selectedDevice?.channels ?? 1), id: \.self) { i in Text("\(i + 1)").tag(i) }
+                    }.frame(width: 110)
+                    Button("Actualizar") { probe.refreshInputs() }
+                }.disabled(probe.recording || probe.requesting)
+                HStack {
+                    Button("Grabar prueba") { probe.start() }.disabled(!ProbeBuild.canCapture || probe.recording || probe.requesting || probe.selectedDevice == nil)
                     Button("Finalizar captura") { probe.stop() }.disabled(!probe.recording)
                     Text(String(format: "%.1f / 15 s", probe.seconds)).monospacedDigit()
                 }
+                Text(probe.capturedRoute).font(.caption).textSelection(.enabled)
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text(String(format: "Ganancia de copias A/B: +%.0f dB", probe.copyGainDB))
+                        Slider(value: $probe.copyGainDB, in: 0...24, step: 1)
+                            .onChange(of: probe.copyGainDB) { _ in probe.preparePair() }
+                    }
+                    HStack {
+                        Text(String(format: "Filtro suave: %.0f %%", probe.filterMix * 100))
+                        Slider(value: $probe.filterMix, in: 0...0.25, step: 0.05)
+                            .onChange(of: probe.filterMix) { _ in probe.preparePair() }
+                    }
+                    Text("0 % = bypass. 25 % conserva 75 % del original; no garantiza conservar cada palabra. Ganancia compartida con margen −1 dBFS, sin AGC. La captura fuente no cambia.").font(.caption)
+                }.disabled(probe.recording || probe.requesting)
+                Text(probe.levelsText).font(.caption).textSelection(.enabled)
                 Toggle("Uso auriculares y he bajado el volumen de salida", isOn: $probe.headphones)
-                    .onChange(of: probe.headphones) { enabled in if !enabled { probe.stopPlayback() } }
+                    .onChange(of: probe.headphones) { enabled in probe.confirmHeadphones(enabled) }
+                HStack {
+                    Text(String(format: "Volumen de app: %.0f %%", probe.listenVolume * 100))
+                    Slider(value: $probe.listenVolume, in: 0...1, step: 0.05)
+                        .onChange(of: probe.listenVolume) { _ in probe.stopPlayback() }
+                    Text("Cambiar detiene el sonido; vuelve a pulsar Escuchar.").font(.caption)
+                }
                 HStack {
                     Button("Tono suave 1 s") { probe.tone() }.disabled(probe.recording || probe.requesting || !probe.headphones)
                     Button("Escuchar original") { probe.play(cleaned: false) }.disabled(!probe.hasAudio || probe.recording || probe.requesting || !probe.headphones)
-                    Button("Escuchar limpio") { probe.play(cleaned: true) }.disabled(!probe.hasAudio || probe.recording || probe.requesting || !probe.headphones)
+                    Button("Escuchar filtrado") { probe.play(cleaned: true) }.disabled(!probe.hasAudio || probe.recording || probe.requesting || !probe.headphones)
                     Button("Parar sonido") { probe.stopPlayback() }
                 }
                 HStack {
                     Button("Exportar original…") { probe.export(cleaned: false) }
-                    Button("Exportar limpio…") { probe.export(cleaned: true) }
+                    Button("Exportar filtrado…") { probe.export(cleaned: true) }
+                    Button("Exportar captura fuente…") { probe.export(cleaned: false, source: true) }
                     Button("Descartar prueba") { probe.clear() }
                 }.disabled(!probe.hasAudio || probe.recording || probe.requesting)
                 Divider()
                 Text(probe.status).textSelection(.enabled).frame(minHeight: 70, alignment: .topLeading)
                 Text("Sin red, pesos, grabación automática, AGC ni cancelación de eco. Audio temporal en RAM; WAV solo al exportar. Calidad limitada con ráfagas. No usar aún en llamadas.")
                     .font(.footnote).foregroundColor(.secondary)
-            }.padding(24).frame(minWidth: 780, minHeight: 390)
+            }.padding(24).frame(minWidth: 780, minHeight: 390) }
     }
 }
