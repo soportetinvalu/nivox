@@ -13,11 +13,39 @@ import tempfile
 import time
 import unittest
 import sys
+import test_driver_state as probe_tests
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'callaudio/installer/manage-driver.sh'
+PROBE_SOURCE = probe_tests.SOURCE
 BASH = 'bash'
 RECORDS = []
+
+# Linux-only fixture: alter wall time, NEVER alarms or CLOCK_MONOTONIC.
+CLOCK_SHIM = r'''
+#define _GNU_SOURCE
+#include <time.h>
+#include <sys/time.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <stdlib.h>
+static time_t wall(void) {
+    static time_t origin;
+    struct timespec now;
+    syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &now);
+    if (!origin) origin = now.tv_sec;
+    const char *mode = getenv("WALL_MODE");
+    return 1700000000 - (mode && mode[0] == 'b' ? 20 * (now.tv_sec - origin) : 0);
+}
+time_t time(time_t *out) { time_t t = wall(); if (out) *out = t; return t; }
+int gettimeofday(struct timeval *tv, void *tz) {
+    (void)tz; tv->tv_sec = wall(); tv->tv_usec = 0; return 0;
+}
+int clock_gettime(clockid_t id, struct timespec *ts) {
+    if (id == CLOCK_REALTIME) { ts->tv_sec = wall(); ts->tv_nsec = 0; return 0; }
+    return syscall(SYS_clock_gettime, id, ts);
+}
+'''
 
 
 def hashes(bundle):
@@ -94,6 +122,7 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
                             stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
                             lock=(self.hal / '.NivoxAudio.lock').exists(),
                             restarts=(self.base / 'restarts').read_text() if (self.base / 'restarts').exists() else '0',
+                            c_hal_entries=(self.base / 'c-hal-ready').read_text().splitlines() if (self.base / 'c-hal-ready').exists() else [],
                             probes=(self.base / 'probes').read_text().splitlines() if (self.base / 'probes').exists() else [],
                             retained=sorted(str(p.relative_to(self.library)) for p in
                                             (self.library / 'Audio/.NivoxAudio-history').glob('transaction.*/*')),
@@ -383,7 +412,163 @@ if [ "$n" -le 2 ]; then echo 'injected transient timeout' >&2; exit 124; fi
     def shorten_phase_budget(self, seconds):
         text = self.script.read_text()
         self.assertIn('deadline=$((SECONDS+40))', text)
+        text = text.replace('allowance=40', f'allowance={seconds}')
         self.script.write_text(text.replace('deadline=$((SECONDS+40))', f'deadline=$((SECONDS+{seconds}))'))
+
+    def communicate_bounded(self, p, args, start, limit):
+        try:
+            out, err = p.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            out, err = p.communicate()
+            self.record(subprocess.CompletedProcess(p.args, p.returncode, out, err),
+                                 args, time.monotonic() - start)
+            RECORDS[-1]['outer_timeout'] = True
+            self.fail('outer monotonic timeout: ' + str(args))
+        return self.record(subprocess.CompletedProcess(p.args, p.returncode, out, err),
+                           args, time.monotonic() - start)
+
+    def use_c_probe(self):
+        binary = probe_tests.compile_probe(self.base / 'synthetic-hal', PROBE_SOURCE)
+        shutil.copyfile(binary, self.helper)
+        self.helper.chmod(0o755)
+        self.env.update(SCENARIO='service-hang', HAL_HANG_MARKER=str(self.base / 'c-hal-ready'))
+
+    def test_inherited_blocked_alarm_recovers_and_unlocks_with_real_c_probe(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.shorten_phase_budget(2)
+        self.use_c_probe()
+        start = time.monotonic()
+        p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}))
+        result = self.communicate_bounded(p, ['uninstall', 'blocked-alarm-real-C'], start, 6)
+        self.assert_failed(result)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertEqual([hashes(b) for b in self.previous()], [original])
+        self.assertEqual((self.base / 'c-hal-ready').read_text().splitlines(), ['ready'] * 2)
+        self.assertIn('RECOVERY UNVERIFIED', result.stderr)
+
+    def test_double_ctrl_c_with_blocked_alarm_still_bounds_real_c_recovery(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.shorten_phase_budget(3)
+        self.use_c_probe()
+        start = time.monotonic()
+        p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}))
+        try:
+            for entries in [1, 2]:
+                deadline = time.monotonic() + 4
+                marker = self.base / 'c-hal-ready'
+                while not marker.exists() or len(marker.read_text().splitlines()) < entries:
+                    if time.monotonic() >= deadline or p.poll() is not None:
+                        self.fail('C probe did not reach HAL entry ' + str(entries))
+                    time.sleep(0.01)
+                os.killpg(p.pid, signal.SIGINT)
+            result = self.communicate_bounded(p, ['uninstall', 'blocked-alarm-double-Ctrl-C'], start, 5)
+        finally:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.communicate()
+        self.assert_failed(result)
+        self.assertEqual(result.returncode, 130)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertEqual([hashes(b) for b in self.previous()], [original])
+        self.assertIn('RECOVERY UNVERIFIED', result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'LD_PRELOAD fixture requires Linux')
+    def test_frozen_and_backward_wall_clock_have_real_bounded_phase_and_recovery(self):
+        cc = shutil.which('clang') or shutil.which('cc')
+        self.assertTrue(cc, 'C compiler required for wall-clock fixture')
+        assert cc is not None
+        shim = self.base / 'wall.c'
+        shim.write_text(CLOCK_SHIM)
+        library = self.base / 'wall.so'
+        subprocess.run([cc, '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
+                        str(shim), '-o', str(library)], check=True, capture_output=True, text=True)
+        self.shorten_phase_budget(7)  # [5, 1] + one real sleep = 7 seconds per phase.
+        self.blocking_timeout_helper(recovery_also=True)
+        (self.bin / 'sleep').write_text('#!/bin/bash\nexec /bin/sleep "$@"\n')
+        for mode in ['frozen', 'backward']:
+            with self.subTest(clock=mode):
+                # Isolate counterprobe residue after recording a failed base.
+                shutil.rmtree(self.hal / '.NivoxAudio.lock', ignore_errors=True)
+                shutil.rmtree(self.dst, ignore_errors=True)
+                self.installed()
+                original = hashes(self.dst)
+                for name in ['budgets', 'probes', 'restarts']:
+                    (self.base / name).unlink(missing_ok=True)
+                env = dict(self.env, LD_PRELOAD=str(library), WALL_MODE=mode)
+                sample = subprocess.run([BASH, '-c',
+                    'printf "%s\\n" "$SECONDS"; /bin/sleep 1.1; printf "%s\\n" "$SECONDS"'],
+                    env=env, text=True, capture_output=True, check=True, timeout=3)
+                values = list(map(int, sample.stdout.splitlines()))
+                self.assertEqual(values[0], 0)
+                if mode == 'frozen': self.assertEqual(values[1], 0)
+                else: self.assertLess(values[1], 0)
+                start = time.monotonic()
+                p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=env,
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                result = self.communicate_bounded(p, ['uninstall', mode + '-wall-clock'], start, 18)
+                RECORDS[-1]['wall_seconds_samples'] = values
+                self.assert_failed(result)
+                self.assertGreaterEqual(RECORDS[-1]['elapsed_seconds'], 14)
+                self.assertLess(RECORDS[-1]['elapsed_seconds'], 17)
+                self.assertEqual((self.base / 'budgets').read_text().splitlines(), ['5', '1'] * 2)
+                self.assertEqual(hashes(self.dst), original)
+                self.assertEqual((self.base / 'restarts').read_text(), '2')
+                self.assertIn('RECOVERY UNVERIFIED', result.stderr)
+
+    def check_transient_timeout_broken_stderr(self, broken_pipe):
+        self.timeout_then_state_helper()
+        helper_body = self.helper.read_text()
+        for final_rc in [None, 1]:
+            with self.subTest(final_rc=final_rc):
+                shutil.rmtree(self.hal / '.NivoxAudio.lock', ignore_errors=True)
+                shutil.rmtree(self.dst, ignore_errors=True)
+                self.helper.write_text(helper_body)
+                (self.base / 'timeout-count').unlink(missing_ok=True)
+                (self.base / 'probes').unlink(missing_ok=True)
+                (self.base / 'restarts').unlink(missing_ok=True)
+                (self.base / 'count').unlink(missing_ok=True)
+                self.installed()
+                original = hashes(self.dst)
+                if final_rc:
+                    self.helper.write_text(self.helper.read_text().replace(
+                        'n=$(cat "$STATE/restarts")', 'exit 1\nn=$(cat "$STATE/restarts")'))
+                if broken_pipe:
+                    reader, writer = os.pipe()
+                    os.close(reader)
+                    output = os.fdopen(writer, 'w')
+                else:
+                    output = open('/dev/full', 'w')
+                with output:
+                    p = subprocess.run([BASH, str(self.script), 'uninstall'], env=self.env,
+                        text=True, stdout=subprocess.PIPE, stderr=output, timeout=10)
+                p.stderr = ''
+                self.record(p, ['uninstall', 'transient-timeout-broken-stderr', str(broken_pipe), str(final_rc)])
+                self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+                if final_rc is None:
+                    self.assertEqual(p.returncode, 0, p.stdout)
+                    self.assertIn('Completed uninstall', p.stdout)
+                    self.assertFalse(self.dst.exists())
+                else:
+                    self.assert_failed(p)
+                    self.assertEqual(hashes(self.dst), original)
+                    self.assertEqual((self.base / 'restarts').read_text(), '2')
+                self.assertTrue(all(hashes(b) == original for b in self.previous()))
+                calls = (self.base / 'probes').read_text().splitlines()
+                self.assertGreaterEqual(calls.count('absent'), 3)
+
+    @unittest.skipUnless(Path('/dev/full').exists(), '/dev/full is a Linux fixture')
+    def test_transient_timeout_stderr_full_is_best_effort_not_false_success(self):
+        self.check_transient_timeout_broken_stderr(False)
+
+    def test_transient_timeout_stderr_epipe_is_best_effort_not_false_success(self):
+        self.check_transient_timeout_broken_stderr(True)
 
     def blocking_timeout_helper(self, recovery_also=False):
         # Real alarm/exit124 consumes the budget received from the actual shell.
@@ -832,8 +1017,11 @@ if __name__ == '__main__':
     parser.add_argument('--bash', default=BASH, help='Shell running the manager (e.g. Bash 3.2)')
     parser.add_argument('--manager-source', type=Path, default=SCRIPT,
                         help='Test-only source override for historical counterprobes')
+    parser.add_argument('--probe-source', type=Path, default=PROBE_SOURCE,
+                        help='Test-only C source override for inherited-signal counterprobes')
     args, remaining = parser.parse_known_args()
     SCRIPT = args.manager_source.resolve()
+    PROBE_SOURCE = args.probe_source.resolve()
     BASH = str(Path(shutil.which(args.bash) or args.bash).resolve())
     bash_version = subprocess.run([BASH, '--version'], check=True, capture_output=True,
                                   text=True).stdout.splitlines()[0]
@@ -844,6 +1032,7 @@ if __name__ == '__main__':
             scope='Sandbox; substituted OS/HAL commands, NOT native acceptance',
             bash=BASH, bash_version=bash_version,
             manager_sha256=hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
+            probe_sha256=hashlib.sha256(PROBE_SOURCE.read_bytes()).hexdigest(),
             tests=suite.result.testsRun, failures=len(suite.result.failures),
             errors=len(suite.result.errors), records=RECORDS), indent=2) + '\n')
     sys.exit(not suite.result.wasSuccessful())

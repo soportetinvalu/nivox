@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ HEADER = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
 typedef uint32_t UInt32;
 typedef uint32_t AudioObjectID;
 typedef uint32_t AudioObjectPropertySelector;
@@ -46,7 +48,14 @@ static void CFRelease(CFStringRef s) { (void)s; }
 static OSStatus AudioObjectGetPropertyDataSize(AudioObjectID d,
     const AudioObjectPropertyAddress *a, UInt32 n, const void *q, UInt32 *size) {
     (void)d; (void)a; (void)n; (void)q; *size = sizeof(AudioObjectID);
-    if (!strcmp(mode(), "service-hang")) for (;;) pause();
+    if (!strcmp(mode(), "service-hang")) {
+        const char *marker = getenv("HAL_HANG_MARKER");
+        if (marker) {
+            FILE *f = fopen(marker, "a");
+            if (f) { fputs("ready\n", f); fclose(f); }
+        }
+        for (;;) pause();
+    }
     return !strcmp(mode(), "service-error") ? -77 : noErr;
 }
 static OSStatus AudioObjectGetPropertyData(AudioObjectID d,
@@ -80,23 +89,29 @@ static OSStatus AudioObjectGetPropertyData(AudioObjectID d,
 '''
 
 
+def compile_probe(base, source):
+    base.mkdir(parents=True, exist_ok=True)
+    for directory in ['CoreAudio', 'CoreFoundation']:
+        folder = base / directory
+        folder.mkdir()
+        (folder / (directory + '.h')).write_text(HEADER)
+    binary = base / 'probe'
+    cc = shutil.which('clang') or shutil.which('cc')
+    if not cc:
+        raise RuntimeError('C compiler required for probe logic tests')
+    subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-pragmas',
+                    '-I' + str(base), str(source), '-o', str(binary)],
+                   check=True, capture_output=True, text=True)
+    return binary
+
+
 class DriverStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         (ROOT / 'build').mkdir(exist_ok=True)
         cls.tmp = tempfile.TemporaryDirectory(prefix='probe-logic-', dir=ROOT / 'build')
         cls.base = Path(cls.tmp.name)
-        for directory in ['CoreAudio', 'CoreFoundation']:
-            folder = cls.base / directory
-            folder.mkdir()
-            (folder / (directory + '.h')).write_text(HEADER)
-        cls.binary = cls.base / 'probe'
-        cc = shutil.which('clang') or shutil.which('cc')
-        if not cc:
-            raise RuntimeError('C compiler required for probe logic tests')
-        subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-pragmas',
-                        '-I' + str(cls.base), str(SOURCE),
-                        '-o', str(cls.binary)], check=True, capture_output=True, text=True)
+        cls.binary = compile_probe(cls.base, SOURCE)
 
     @classmethod
     def tearDownClass(cls):
@@ -105,17 +120,28 @@ class DriverStateTests(unittest.TestCase):
     def probe(self, expected, scenario):
         return self.run_probe(expected, scenario, 5).returncode
 
-    def run_probe(self, expected, scenario, timeout, budget=None):
+    def run_probe(self, expected, scenario, timeout, budget=None, inherited=None, via_bash=False):
+        def inherit_alarm():
+            assert inherited is not None
+            if 'ignored' in inherited:
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            if 'blocked' in inherited:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
         start = time.monotonic()
         try:
             command = [str(self.binary), expected] + ([] if budget is None else [str(budget)])
+            if via_bash:
+                command = ['bash', '-c', 'exec "$@"', 'probe-launch', *command]
             p = subprocess.run(command, env={'SCENARIO': scenario},
-                               capture_output=True, text=True, timeout=timeout)
+                               capture_output=True, text=True, timeout=timeout,
+                               preexec_fn=inherit_alarm if inherited else None)
         except subprocess.TimeoutExpired:
             RECORDS.append(dict(test=self.id(), expected=expected, scenario=scenario,
+                                inherited=inherited, via_bash=via_bash,
                                 outer_timeout=True, elapsed=time.monotonic() - start))
             raise
         RECORDS.append(dict(test=self.id(), expected=expected, scenario=scenario,
+                            inherited=inherited, via_bash=via_bash,
                             rc=p.returncode, stdout=p.stdout, stderr=p.stderr,
                             elapsed=time.monotonic() - start))
         return p
@@ -170,6 +196,17 @@ class DriverStateTests(unittest.TestCase):
                 self.assertIn('HAL probe exceeded deadline', p.stderr)
                 self.assertGreaterEqual(elapsed, 4)
                 self.assertLess(elapsed, 8)
+
+    def test_inherited_alarm_mask_and_disposition_cannot_disable_deadline(self):
+        # Real exec signal inheritance, including a shell between parent and C.
+        for inherited in ['blocked', 'ignored', 'blocked-ignored']:
+            for via_bash in [False, True]:
+                for scenario in ['service-hang', 'lookup-hang', 'alive-hang']:
+                    with self.subTest(inherited=inherited, via_bash=via_bash, scenario=scenario):
+                        p = self.run_probe('present', scenario, 2.5, budget=1,
+                                           inherited=inherited, via_bash=via_bash)
+                        self.assertEqual(p.returncode, 124, p.stderr)
+                        self.assertIn('HAL probe exceeded deadline', p.stderr)
 
 
 if __name__ == '__main__':

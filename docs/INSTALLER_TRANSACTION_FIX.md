@@ -48,18 +48,29 @@ no se anticipa ni dispensa los fallos anteriores.
   a una transacción root-only con permisos restringidos antes de usarlo.
 - La sonda arma una alarma **antes de cualquier llamada HAL**: por defecto 5 s,
   o un argumento explícito entero `1..5` que nunca permite desactivarla/ampliarla.
-  El gestor pasa `min(5, deadline-SECONDS)`. El manejador usa solo
+  Instala `sigaction` y desbloquea explícitamente SIGALRM con `sigprocmask`:
+  `exec` conserva la máscara bloqueada heredada, aunque se sustituya SIG_IGN.
+  Si falla preparar la señal, sale RC2 antes de HAL. El gestor pasa
+  `min(5, deadline-SECONDS, allowance)`. El manejador usa solo
   `write`/`_exit(124)`, incluso con una consulta IPC bloqueada. RC124 es un fallo
   reintentable solo dentro del plazo de la fase; nunca acredita presencia/ausencia.
   No depende de una utilidad `timeout` ausente en macOS.
-- El polling tiene presupuesto transcurrido de 40 s (`SECONDS`) y máximo
-  de 40 consultas, sin reiniciar el plazo al reintentar. La última sonda recibe
+- El polling combina el plazo de pared de 40 s (`SECONDS`) con un **saldo
+  conservador de 40 s independiente del reloj**. Antes de cada consulta descuenta
+  todo el presupuesto solicitado (aunque termine pronto) y antes de cada pausa
+  descuenta 1 s. Nunca repone ese saldo. La suma de alarmas solicitadas + pausas
+  no supera 40 s por fase incluso con reloj congelado/en retroceso; en ese caso,
+  con consultas bloqueadas se obtienen `[5,5,5,5,5,5,4]` y seis pausas de 1 s.
+  Sigue el máximo secundario de 40 consultas, sin reiniciar el plazo al reintentar.
+  Esta política puede agotar antes los reintentos si las consultas fallan rápido:
+  se prefiere fallar cerrado a ampliar el corte. La última sonda recibe
   solo el tiempo restante, sin los anteriores 5 s adicionales. RC0 llegado al
   vencer el plazo tampoco se acepta. Se conserva cada intento en el log de fase.
   RC1/2 mantienen el polling previo por discrepancia/error de consulta; otros
   errores y señales de la sonda abortan la fase y conservan su RC, no se ignoran.
-  `SECONDS` tiene resolución de un segundo: este límite del polling no es una
-  garantía de tiempo real ni incluye el coste de lanzar procesos/planificación.
+  `SECONDS` tiene resolución de un segundo: no es un reloj monotónico; el saldo
+  limita el trabajo de espera sin depender de él. No es una garantía de tiempo
+  real estricto ni incluye el coste de lanzar procesos/planificación.
   La reversa tiene su propio presupuesto. Esto no es un plazo global de la
   transacción: copia, firma, reinicio, arranque previo a `main`, fallos del kernel
   o planificación no tienen aquí un watchdog independiente. No se promete una
@@ -110,14 +121,14 @@ python3 callaudio/tests/test_driver_state.py --evidence build/driver-state-synth
 bash -n callaudio/installer/manage-driver.sh
 ```
 
-- **29 pruebas de gestor** (25 anteriores + 4 regresiones): primer install; rechazo sin mutación de install y
+- Cobertura histórica de **29 pruebas de gestor**, ampliada abajo: primer install; rechazo sin mutación de install y
   restore, incluido respaldo válido; retirada/restauración de la misma versión;
   reinicio/carga/firma fallidos; copia parcial por ENOSPC; fallo de publicar la
   copia; rescate correcto y rescate fallido; RC124; presupuesto temporal; señales
   HUP/INT/TERM repetidas al padre y al grupo durante copia; doble Ctrl-C durante
   consulta principal/reversa; señal inmediatamente después de mover el original;
   plataforma/root/rutas/cuarentena/helper/candado. Inventarios SHA-256 completos.
-- **6 pruebas de sonda C**, incluyendo bloqueos infinitos en consulta de servicio,
+- Cobertura histórica de **6 pruebas de sonda C**, ampliada abajo, incluyendo bloqueos infinitos en consulta de servicio,
   UID y estado vivo: el proceso real sale con RC124 y mensaje a los cinco segundos.
   HAL/SDK son sintéticos; el temporizador y el proceso sí son reales.
 - Evidencia local: `build/installer-audit-fixes-final.json`,
@@ -241,6 +252,62 @@ python3 tests/test_delivery.py --out build/delivery-lock-fix
 python3 ci/export_sources.py --out build/public-sources-lock-fix
 ```
 
+## Máscara heredada, reloj adverso y stderr — corrección sobre `9a70858`
+
+**41/41 métodos del gestor y 8/8 de la sonda C, GNU Bash 5.2/Linux**. El cambio
+productivo se limita a la preparación de SIGALRM, saldo conservador del polling
+y aviso RC124. Las guardas, RC de error/estado, reversa y traps del padre no se
+relajan. El aviso transitorio se escribe en un subshell que ignora solo PIPE y
+tolera errores de escritura; no cambia los traps de la transacción. Con stderr
+roto, solo un RC0 posterior de la sonda puede permitir `Completed`.
+
+Pruebas nuevas incluidas en las dos suites habituales:
+
+- 18 combinaciones: SIGALRM bloqueada, ignorada o ambas; ejecución directa y vía
+  Bash; HAL colgada en servicio, UID y estado vivo. Todas salen RC124 con alarma
+  real de 1 s. Una señal ignorada y una señal bloqueada son casos distintos.
+- Gestor con el C productivo, HAL sintética y SIGALRM bloqueada heredada: principal
+  y reversa acotadas, bytes originales/respaldo iguales, candado libre y
+  `RECOVERY UNVERIFIED` honesto. También doble Ctrl-C sincronizado con entrada a
+  HAL: la reversa ignora INT pero su alarma vence y libera el candado; RC130.
+- Reloj congelado/en retroceso por `LD_PRELOAD` de `gettimeofday`, `time` y
+  `clock_gettime(CLOCK_REALTIME)` solo en los hijos sandbox. Se verifica que
+  `SECONDS` realmente queda `[0,0]` o decrece; no se cambia el reloj del host,
+  CLOCK_MONOTONIC ni las alarmas. Con saldo/plazo sandbox de 7 s, cada fase usa
+  `[5,1]` + pausa real de 1 s: ambas fases ~14 s, medidas por el padre monotónico.
+  El caso existente con 40 s productivos y reloj normal sigue ejecutándose.
+- stderr `/dev/full` y pipe sin lector durante dos RC124: un estado correcto
+  posterior permite terminar; si el estado sigue siendo incorrecto, falla y
+  restaura bytes/libera candado. Se conservan todos los casos anteriores de
+  reversa con errores de salida/copia/reinicio y señales.
+
+Contrapruebas reproducibles (deben ponerse rojas por estos defectos):
+
+```sh
+git show 9a70858:callaudio/installer/manage-driver.sh > build/manager-9a70858.sh
+git show 9a70858:callaudio/installer/nv_driver_state.c > build/probe-9a70858.c
+python3 callaudio/tests/test_installer.py --manager-source build/manager-9a70858.sh \
+  --evidence build/counterprobe-wall-stderr.json \
+  InstallerTests.test_frozen_and_backward_wall_clock_have_real_bounded_phase_and_recovery \
+  InstallerTests.test_transient_timeout_stderr_full_is_best_effort_not_false_success \
+  InstallerTests.test_transient_timeout_stderr_epipe_is_best_effort_not_false_success
+python3 callaudio/tests/test_driver_state.py --probe-source build/probe-9a70858.c \
+  --evidence build/counterprobe-signal-mask.json \
+  DriverStateTests.test_inherited_alarm_mask_and_disposition_cannot_disable_deadline
+```
+
+Sobre la base: reloj excede el tope monotónico externo de 18 s; stderr aborta en
+el primer RC124 (RC1/141); SIGALRM bloqueada hace colgar el C directo y vía Bash
+(TimeoutExpired del supervisor). Los procesos colgados se matan por grupo/PID
+solo en el sandbox; no es una estrategia operativa del instalador.
+
+Evidencia local cruda y fallo inicial del arnés preservados en
+`/root/.hermes/datos/rea-neep/evidence/hal-real-bound-fix/`. El primer ensayo
+compartía el contador de reinicios entre los subcasos stderr; se aisló la fixture
+y la suite final completa pasó. No se presenta ese primer ensayo como verde.
+No se ejecutó Bash 3.2 ni SDK Apple en este Linux. No se acredita carga nativa,
+audio sano, ni un plazo de toda la transacción. No se tocó la Mac del usuario.
+
 ## Aceptación nativa pendiente
 
 ### Corrección de la causa temporal evidenciada en run `41770252364`
@@ -250,7 +317,7 @@ alarma individual de 5 s (throttle de launchd observado de unos 10 s). Se cambia
 solo la política de RC124, no la definición de presencia ni las guardas de firma,
 reemplazo, reinicio o reversa. No se añaden esperas ciegas a la CI.
 
-Pruebas actuales: **36 métodos del gestor en GNU Bash 5.2/Linux**, incluidos
+Pruebas de la revisión histórica `9a70858`: **36 métodos del gestor en GNU Bash 5.2/Linux**, incluidos
 timeout transitorio en install/uninstall/restore, HAL que sigue ausente, timeout
 permanente, reversa verificada/no verificada, éxito tardío rechazado, RC126 fatal,
 doble Ctrl-C después de timeouts en ambas fases, y los casos anteriores de

@@ -3,6 +3,7 @@
  * Exit 0: expected state; 1: state mismatch; 2: query/usage error.
  * Run as a fresh process per poll to avoid retaining pre-restart HAL objects.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
@@ -59,7 +60,14 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (argc == 3) budget = (unsigned)(argv[2][0] - '0');
-    if (signal(SIGALRM, deadline_exceeded) == SIG_ERR) return 2;
+    struct sigaction action = {0};
+    sigset_t alarm_set;
+    action.sa_handler = deadline_exceeded;
+    if (sigemptyset(&action.sa_mask) || sigemptyset(&alarm_set) ||
+        sigaddset(&alarm_set, SIGALRM) ||
+        sigaction(SIGALRM, &action, NULL) ||
+        sigprocmask(SIG_UNBLOCK, &alarm_set, NULL)) return 2;
+    /* exec preserves a blocked signal mask: resetting SIG_IGN alone is not enough. */
     alarm(budget); /* Before any HAL call; never longer than the phase remainder. */
     int present = !strcmp(argv[1], "present");
     AudioObjectPropertyAddress a = address(kAudioHardwarePropertyDevices);
