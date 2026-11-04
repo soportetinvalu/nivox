@@ -2,9 +2,11 @@
 
 ## Alcance y estado
 
-Corrección proporcionada de los defectos auditados en `fca9f9e`: señales durante
-la reversa, sonda bloqueada, copia de recuperación fallida y aceptación falsa de
-una actualización basada únicamente en los mismos UID. No cambia UI, DSP,
+Corrección proporcionada de los defectos auditados en `fca9f9e` y de los
+contraexperimentos X1/X2b/X4b reproducidos sobre `faa7b6d`: señales durante
+la reversa, errores de salida, sonda bloqueada, copia de recuperación fallida y
+aceptación falsa de una actualización basada únicamente en los mismos UID.
+No cambia UI, DSP,
 umbrales E2E ni firma. No instala nada en la Mac del usuario ni publica Releases.
 
 **Verificación local: Linux con shell real en sandbox y C productivo contra una
@@ -57,12 +59,20 @@ no se anticipa ni dispensa los fallos anteriores.
 
 ## Reversa e interrupciones
 
-- El trap EXIT desactiva solo EXIT e **ignora HUP/INT/TERM** hasta terminar la
-  reversa y liberar el candado. Los hijos de recuperación heredan esa disposición:
-  otra señal al shell o al grupo de primer plano no mata la copia ni silencia
-  los avisos finales. Se conserva el RC original no-cero; ninguna reversa emite
-  `Completed`. Marcar intención antes de mover el original evita la ventana entre
-  el `mv` y la actualización del estado del shell.
+- EXIT y HUP/INT/TERM/PIPE llaman directamente al mismo `finish`, con el RC
+  como argumento. **Una señal no ejecuta `exit` saltándose un EXIT en curso**,
+  incluso si llega antes del primer comando de protección. `finish` ignora
+  HUP/INT/TERM/PIPE primero y después desactiva EXIT. Los hijos de recuperación
+  heredan esa disposición hasta liberar el candado. No se añade supervisor ni
+  otra máquina de estados. Se conserva el RC no-cero de entrada (130 para
+  HUP/INT/TERM y 141 para PIPE); ninguna reversa emite `Completed`. Marcar
+  intención antes de mover el original protege también la ventana tras `mv`.
+- Solo dentro de la limpieza se desactiva `errexit`: las operaciones de
+  recuperación conservan sus comprobaciones explícitas. Un aviso que falla con
+  ENOSPC/EIO/EPIPE no debe omitir reinicio, verificación ni liberación del candado.
+  Ignorar PIPE durante la limpieza evita morir por escribir a un lector cerrado.
+  Esto **no garantiza entregar avisos si stderr no admite escrituras**; los
+  bundles y logs de sonda que se hayan podido escribir siguen retenidos.
 - Normalmente se copia `previous.driver` a `recovery.driver` y se publica con
   renombrado, conservando el respaldo original. Ante fallo de copia **o de su
   publicación**, se intenta rescatar el original por renombrado directo al HAL,
@@ -92,7 +102,7 @@ python3 callaudio/tests/test_driver_state.py --evidence build/driver-state-synth
 bash -n callaudio/installer/manage-driver.sh
 ```
 
-- **25 pruebas de gestor**: primer install; rechazo sin mutación de install y
+- **29 pruebas de gestor** (25 anteriores + 4 regresiones): primer install; rechazo sin mutación de install y
   restore, incluido respaldo válido; retirada/restauración de la misma versión;
   reinicio/carga/firma fallidos; copia parcial por ENOSPC; fallo de publicar la
   copia; rescate correcto y rescate fallido; RC124; presupuesto temporal; señales
@@ -129,6 +139,47 @@ gestionado falla por una guarda distinta, no demuestra por sí solo un falso
 restore: la candidata lo prueba además con respaldo gestionado válido.
 La sonda histórica supera el timeout externo de 8 s en los tres puntos HAL;
 las tres `TimeoutExpired` son la contraprueba esperada, no una aceptación verde.
+
+### Regresiones adicionales X1/X2b/X4b sobre `faa7b6d`
+
+- Suite completa: **29/29 en GNU Bash 3.2.57 y 5.2.21 sobre Linux**. `--bash`
+  selecciona explícitamente el shell del gestor; los sustitutos OS/HAL siguen
+  usando `/bin/bash`. No acredita el binario Bash de Apple ni semántica HAL real.
+- X1: ventana ampliada **antes del primer comando de `finish`**, con HUP/INT/TERM,
+  más 150 ráfagas TERM sin modificar el gestor por cada shell. El ensayo
+  independiente original añade otras 300 ráfagas por shell: cero pérdidas de
+  recuperación/candado en ambos lotes. Son muestras, no prueba exhaustiva del
+  planificador ni garantía frente a SIGKILL.
+- X2b y X4b: `/dev/full` y pipe stderr sin lector, respectivamente. Para cada
+  salida se prueban copia normal, rescate por renombrado, reinicio fallido,
+  consulta fallida y rescate fallido. Se exigen bytes/copia retenida, RC no-cero,
+  ningún `Completed`, candado liberado y reinicio/consulta cuando corresponden.
+  `/dev/full` es una fixture Linux; ese método se omite donde no exista.
+- Las seis sondas independientes originales X1/X2a/X2b/X2c/X4a/X4b pasan en
+  ambos shells, incluido hangup real de PTY. No se cambió el archivo de auditoría.
+- Contraprueba aislada contra `faa7b6d`: 3 métodos, 13 fallos de aserción y cero
+  errores del arnés en cada shell. X1 deja original desplazado/candado; X2b
+  rescata bytes pero omite segundo reinicio/sonda; X4b muere por SIGPIPE.
+  La primera ejecución diagnóstica contaminaba los subcasos posteriores con el
+  candado fallido anterior. Se conservó y se aisló cada fixture antes de repetir;
+  solo los archivos `counterprobe-isolated-*` acreditan cada subcaso por separado.
+- Sonda C: **6/6**. Regresiones adicionales sin cambios: compatibilidad de build
+  **5/5**, parser de recuperación **8/8**, clasificación E2E **7/7** y orquestación
+  diagnóstica UI **13/13**. No se despachó CI ni se instaló o reinició servicio real.
+- Evidencia cruda local conservada en `build/installer-interruption-fix/`:
+  `bash{32,52}-final.{json,log}`, `independent-bash{32,52}.{json,log}`,
+  `counterprobe-isolated-bash{32,52}.{json,log}` y `driver-state.json`.
+  Resumen versionado y hashes: [`INSTALLER_INTERRUPTION_EVIDENCE.json`](INSTALLER_INTERRUPTION_EVIDENCE.json).
+
+```sh
+python3 callaudio/tests/test_installer.py --bash /ruta/a/bash-3.2 \
+  --evidence build/installer-bash32.json
+# Sensibilidad: repetir estos tres métodos con --manager-source de faa7b6d.
+python3 callaudio/tests/test_installer.py \
+  InstallerTests.test_X1_signal_before_first_cleanup_command_still_recovers \
+  InstallerTests.test_X2b_stderr_full_does_not_abort_rescue_restart_or_unlock \
+  InstallerTests.test_X4b_stderr_epipe_does_not_abort_recovery_or_unlock
+```
 
 ## Aceptación nativa pendiente
 

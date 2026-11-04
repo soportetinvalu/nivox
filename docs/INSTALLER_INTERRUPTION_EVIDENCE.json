@@ -1,0 +1,440 @@
+{
+  "scope": "Linux sandbox; GNU Bash, substituted OS/HAL commands; NOT Apple SDK/native acceptance",
+  "base_commit": "faa7b6d",
+  "manager_sha256": "5d951cb72f85204dd6f31c960b56f63d9d5c379e9641bc172fd7730f44163a20",
+  "test_source_sha256": "4dd8a81421b99985dfe28f79c9349b5f5bc60beee534bf0c15ec3cc99b9bf693",
+  "artifacts": [
+    {
+      "path": "build/installer-interruption-fix/bash32-final.json",
+      "sha256": "b65776e4951f90d7aab61ecccdde210b5aa6951d5cc4f199a7ee0e16ab63f7e1",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "bash_version": "GNU bash, version 3.2.57(3)-release (x86_64-unknown-linux-gnu)",
+      "X1_unmodified_runs": 150
+    },
+    {
+      "path": "build/installer-interruption-fix/bash52-final.json",
+      "sha256": "c2004141126a85114a89c962cc0566b3b7b48176f5f79c165b5dd428824d061b",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "bash_version": "GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)",
+      "X1_unmodified_runs": 150
+    },
+    {
+      "path": "build/installer-interruption-fix/independent-bash32.json",
+      "sha256": "9e8f2cd4119add4b6bc075419d811c0229fadc8fbe033df84ef5f8a9a0e2bc18",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "X1_summary": {
+        "test": "X1_summary",
+        "bash": "/root/.hermes/cache/scratch/audit-installer-faa7b6d/bash32/bash-3.2.57/bash",
+        "runs": 300,
+        "bad": 0,
+        "bad_examples": []
+      },
+      "audit_sha256": "6d7eaa1760c1cea994287c90392a027731f92427e248a4d367f57443a004d20c",
+      "observations": [
+        {
+          "tag": "dev-full-rescue",
+          "rc": 1,
+          "lock": false,
+          "restarts": "2",
+          "probes": [
+            "present"
+          ],
+          "installed_equals_original": true
+        },
+        {
+          "tag": "epipe-stderr-recovery",
+          "rc": 141,
+          "lock": false,
+          "restarts": "2",
+          "probes": [
+            "present"
+          ],
+          "installed_equals_original": true
+        }
+      ]
+    },
+    {
+      "path": "build/installer-interruption-fix/independent-bash52.json",
+      "sha256": "2611400368ba4255e19e0fa8092ccd3d731977cb215b5d9f9f59db19dcc6e1f7",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "X1_summary": {
+        "test": "X1_summary",
+        "bash": "bash",
+        "runs": 300,
+        "bad": 0,
+        "bad_examples": []
+      },
+      "audit_sha256": "6d7eaa1760c1cea994287c90392a027731f92427e248a4d367f57443a004d20c",
+      "observations": [
+        {
+          "tag": "dev-full-rescue",
+          "rc": 1,
+          "lock": false,
+          "restarts": "2",
+          "probes": [
+            "present"
+          ],
+          "installed_equals_original": true
+        },
+        {
+          "tag": "epipe-stderr-recovery",
+          "rc": 141,
+          "lock": false,
+          "restarts": "2",
+          "probes": [
+            "present"
+          ],
+          "installed_equals_original": true
+        }
+      ]
+    },
+    {
+      "path": "build/installer-interruption-fix/counterprobe-isolated-bash32.json",
+      "sha256": "4cd961659928bd678cb0e83c48f12adcd07bad56eaf382bc1dbc9306697fce21",
+      "tests": 3,
+      "failures": 13,
+      "errors": 0,
+      "expected_failure": true,
+      "observations": [
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGHUP"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGINT"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGTERM"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "copy"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 1
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "rescue"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "restart-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "probe-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 40
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "rescue-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "copy"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 1
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "rescue"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "restart-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "probe-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 40
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "rescue-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        }
+      ]
+    },
+    {
+      "path": "build/installer-interruption-fix/counterprobe-isolated-bash52.json",
+      "sha256": "2f8f8e115176bbb88015ec3a6292bea061e33fd19b048bb2fdd0b30afb31a2fe",
+      "tests": 3,
+      "failures": 13,
+      "errors": 0,
+      "expected_failure": true,
+      "observations": [
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGHUP"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGINT"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "cleanup-entry",
+            "SIGTERM"
+          ],
+          "rc": 130,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "copy"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 1
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "rescue"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "restart-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "probe-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 40
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "False",
+            "rescue-fails"
+          ],
+          "rc": 1,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "copy"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 1
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "rescue"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "restart-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 0
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "probe-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "2",
+          "probe_count": 40
+        },
+        {
+          "args": [
+            "uninstall",
+            "broken-stderr",
+            "True",
+            "rescue-fails"
+          ],
+          "rc": -13,
+          "lock": true,
+          "restarts": "1",
+          "probe_count": 0
+        }
+      ]
+    },
+    {
+      "path": "build/installer-interruption-fix/driver-state.json",
+      "sha256": "b37ad78122e2d9ec3b2e13f806fd750b0cca7a3c2cd74648907b2afe31c13a0d",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0
+    }
+  ],
+  "limitations": [
+    "No macOS/Apple Bash or HAL acceptance",
+    "No installation, real service restart, release or CI dispatch",
+    "SIGKILL/power loss and unrecoverable disk failures are outside trap guarantees",
+    "stderr diagnostics cannot be delivered to a failed output",
+    "Raw artifacts are local build evidence, not committed; original independent audit unchanged"
+  ]
+}

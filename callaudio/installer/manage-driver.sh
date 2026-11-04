@@ -59,11 +59,15 @@ restart_and_verify() {
     fi
 }
 finish() {
-    rc=$?
+    # Protect recovery before disabling EXIT. A signal arriving even before this
+    # first command calls finish itself, never exits past the pending recovery.
+    # Children inherit ignored signals through recovery AND lock release.
+    trap '' HUP INT TERM PIPE
     trap - EXIT
-    # Ignore catchable termination signals through recovery AND lock release.
-    # Children inherit ignored signals, so repeated Ctrl-C cannot kill ditto.
-    trap '' HUP INT TERM
+    rc=$1
+    # Recovery operations below check their own status. Diagnostic write errors
+    # (full disk, disconnected terminal/pipe) must not skip recovery or unlock.
+    set +e
     if [[ "$committed" == 0 && -n "$txn" ]]; then
         [[ "$rc" != 0 ]] || rc=1
         recovery_failed=0
@@ -98,8 +102,11 @@ finish() {
     rmdir "$lock" || rc=1
     exit "$rc"
 }
-trap finish EXIT
-trap 'exit 130' HUP INT TERM
+trap 'finish "$?"' EXIT
+# Do not exit from a signal trap: it could interrupt an EXIT trap before that
+# trap has protected recovery. Both paths enter the same cleanup directly.
+trap 'finish 130' HUP INT TERM
+trap 'finish 141' PIPE
 case "$mode" in
     install) src="${2:?Missing source bundle}" ;;
     restore)

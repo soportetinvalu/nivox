@@ -16,6 +16,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'callaudio/installer/manage-driver.sh'
+BASH = 'bash'
 RECORDS = []
 
 
@@ -90,6 +91,10 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
         RECORDS.append(dict(test=self.id(), args=list(map(str, args)), rc=p.returncode,
                             stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
                             lock=(self.hal / '.NivoxAudio.lock').exists(),
+                            restarts=(self.base / 'restarts').read_text() if (self.base / 'restarts').exists() else '0',
+                            probes=(self.base / 'probes').read_text().splitlines() if (self.base / 'probes').exists() else [],
+                            retained=sorted(str(p.relative_to(self.library)) for p in
+                                            (self.library / 'Audio/.NivoxAudio-history').glob('transaction.*/*')),
                             previous={str(b): hashes(b) for b in self.previous()},
                             failed={str(b): hashes(b) for b in self.failed()}))
         return p
@@ -98,7 +103,7 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
                     fail_restart: int | str = 0, fail_load: int | str = 0):
         for name in ['count', 'restarts']:
             (self.base / name).unlink(missing_ok=True)
-        p = subprocess.run(['bash', str(self.script), *map(str, args)],
+        p = subprocess.run([BASH, str(self.script), *map(str, args)],
                            env=dict(self.env, FAIL_VERIFY=str(fail_verify),
                                     FAIL_RESTART=str(fail_restart), FAIL_LOAD=str(fail_load)),
                            text=True, capture_output=True, timeout=15)
@@ -380,7 +385,7 @@ case "$2" in */recovery.driver) touch "$STATE/copy-started"; /bin/sleep 0.25;; e
 cp -R "$1" "$2"
 ''')
                     (self.base / 'restarts').unlink(missing_ok=True)
-                    p = subprocess.Popen(['bash', str(self.script), 'uninstall'],
+                    p = subprocess.Popen([BASH, str(self.script), 'uninstall'],
                         env=dict(self.env, FAIL_RESTART='1'), text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                     try:
@@ -413,7 +418,7 @@ if [ "$n" = 1 ]; then /bin/sleep 10; exit 1; fi
 /bin/sleep 0.25
 exit 0
 ''')
-        p = subprocess.Popen(['bash', str(self.script), 'uninstall'], env=self.env,
+        p = subprocess.Popen([BASH, str(self.script), 'uninstall'], env=self.env,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             self.wait_marker('probe-1', p)
@@ -431,6 +436,151 @@ exit 0
         self.assertEqual(p.returncode, 130)
         self.assertEqual(hashes(self.dst), original)
         self.assertIn('state restored', err)
+
+    def test_X1_signal_before_first_cleanup_command_still_recovers(self):
+        # Widen the entry window only in the sandbox, BEFORE any protection.
+        # A signal handler that merely exits skips the already-running EXIT trap.
+        text = self.script.read_text()
+        self.assertIn('finish() {\n', text)
+        self.script.write_text(text.replace('finish() {\n', '''finish() {
+    if [[ ! -e "$STATE/finish-entered" ]]; then
+        touch "$STATE/finish-entered"; /bin/sleep 0.3
+    fi
+''', 1))
+        self.installed()
+        original = hashes(self.dst)
+        for sig in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
+            with self.subTest(signal=sig.name):
+                # Reset only sandbox residue from a failed historical subcase;
+                # its lock/bytes/counters were already recorded before assertions.
+                lock = self.hal / '.NivoxAudio.lock'
+                if lock.exists():
+                    lock.rmdir()
+                if not self.dst.exists():
+                    self.installed()
+                for name in ['finish-entered', 'restarts', 'probes']:
+                    (self.base / name).unlink(missing_ok=True)
+                p = subprocess.Popen([BASH, str(self.script), 'uninstall'],
+                    env=dict(self.env, FAIL_RESTART='1'), text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                try:
+                    self.wait_marker('finish-entered', p)
+                    p.send_signal(sig)
+                    out, err = p.communicate(timeout=10)
+                finally:
+                    if p.poll() is None:
+                        os.killpg(p.pid, signal.SIGKILL)
+                        p.communicate()
+                result = self.record(subprocess.CompletedProcess(p.args, p.returncode, out, err),
+                                     ['uninstall', 'cleanup-entry', sig.name])
+                self.assert_failed(result)
+                self.assertEqual(p.returncode, 130)
+                self.assertEqual(hashes(self.dst), original)
+                self.assertEqual((self.base / 'restarts').read_text(), '2')
+                self.assertEqual((self.base / 'probes').read_text().splitlines(), ['present'])
+                self.assertIn('state restored', err)
+
+    def test_X1_signal_burst_at_unmodified_cleanup_entry(self):
+        self.installed()
+        original = hashes(self.dst)
+        restart = self.bin / 'killall'
+        restart.write_text('''#!/bin/bash
+n=0; [ ! -e "$STATE/restarts" ] || n=$(cat "$STATE/restarts")
+n=$((n+1)); printf '%s' "$n" > "$STATE/restarts"
+if [ "$n" = 1 ]; then
+    ( for ((i=0; i<400; i++)); do kill -TERM "$PPID" 2>/dev/null || exit 0; done ) &
+    exit 7
+fi
+''')
+        # Reproduce the original unmodified-script counterexperiment, not only
+        # the deterministic widened window. No scheduler can exhaust all races.
+        for attempt in range(150):
+            for name in ['restarts', 'probes']:
+                (self.base / name).unlink(missing_ok=True)
+            result = self.run_manager('uninstall')
+            self.assert_failed(result)
+            self.assertEqual(hashes(self.dst), original, attempt)
+            self.assertEqual((self.base / 'restarts').read_text(), '2', attempt)
+            self.assertEqual((self.base / 'probes').read_text().splitlines(), ['present'], attempt)
+            self.assertIn('state restored', result.stderr)
+
+    def check_broken_stderr_recovery(self, broken_pipe):
+        self.installed()
+        original = hashes(self.dst)
+        move = self.bin / 'mv'
+        move.write_text('''#!/bin/bash
+if [ "${RESCUE:-0}" = 1 ]; then
+    case "$1" in */recovery.driver) exit 8;; esac
+fi
+exec /bin/mv "$@"
+''')
+        move.chmod(0o755)
+        # Both normal copy and rescue must restart + probe after a failed write.
+        # Also preserve negative restart/probe/rescue outcomes (never success).
+        for case in ['copy', 'rescue', 'restart-fails', 'probe-fails', 'rescue-fails']:
+            with self.subTest(output='pipe' if broken_pipe else 'full', case=case):
+                # Isolate historical failures too; a stale lock must not turn the
+                # next rescue counterprobe into an unrelated preflight rejection.
+                lock = self.hal / '.NivoxAudio.lock'
+                if lock.exists():
+                    lock.rmdir()
+                for name in ['restarts', 'probes']:
+                    (self.base / name).unlink(missing_ok=True)
+                if not self.dst.exists():
+                    self.installed()
+                if case == 'rescue-fails':
+                    move.write_text('''#!/bin/bash
+case "$1" in */recovery.driver|*/previous.driver) exit 8;; esac
+exec /bin/mv "$@"
+''')
+                env = dict(self.env, RESCUE='1' if case == 'rescue' else '0',
+                           FAIL_RESTART='all' if case == 'restart-fails' else '1',
+                           FAIL_LOAD='all' if case == 'probe-fails' else '0')
+                if broken_pipe:
+                    reader, writer = os.pipe()
+                    os.close(reader)
+                    output = os.fdopen(writer, 'w')
+                else:
+                    output = open('/dev/full', 'w')
+                with output:
+                    result = subprocess.run([BASH, str(self.script), 'uninstall'],
+                        env=env, text=True, stdout=subprocess.PIPE, stderr=output, timeout=15)
+                # stderr is intentionally unavailable; do not invent diagnostics.
+                result.stderr = ''
+                self.record(result, ['uninstall', 'broken-stderr', str(broken_pipe), case])
+                self.assert_failed(result)
+                self.assertGreater(result.returncode, 0)  # not death by SIGPIPE
+                txn = sorted((self.library / 'Audio/.NivoxAudio-history').glob('transaction.*'),
+                             key=lambda p: p.stat().st_mtime_ns)[-1]
+                if case == 'rescue-fails':
+                    self.assertFalse(self.dst.exists())
+                    self.assertEqual(hashes(txn / 'previous.driver'), original)
+                    self.assertEqual((self.base / 'restarts').read_text(), '1')
+                    self.assertFalse((self.base / 'probes').exists())
+                else:
+                    self.assertEqual(hashes(self.dst), original)
+                    self.assertEqual((self.base / 'restarts').read_text(), '2')
+                    if case == 'restart-fails':
+                        self.assertFalse((self.base / 'probes').exists())
+                    else:
+                        calls = (self.base / 'probes').read_text().splitlines()
+                        self.assertTrue(calls)
+                        self.assertEqual(set(calls), {'present'})
+                        self.assertTrue((txn / 'recovery-hal-state.log').exists())
+                        if case == 'probe-fails':
+                            self.assertIn('injected HAL query/state failure',
+                                          (txn / 'recovery-hal-state.log').read_text())
+                    self.assertEqual(hashes(txn / 'recovery.driver'),
+                                     original if case == 'rescue' else None)
+                    self.assertEqual(hashes(txn / 'previous.driver'),
+                                     None if case == 'rescue' else original)
+
+    @unittest.skipUnless(Path('/dev/full').exists(), '/dev/full is a Linux fixture')
+    def test_X2b_stderr_full_does_not_abort_rescue_restart_or_unlock(self):
+        self.check_broken_stderr_recovery(broken_pipe=False)
+
+    def test_X4b_stderr_epipe_does_not_abort_recovery_or_unlock(self):
+        self.check_broken_stderr_recovery(broken_pipe=True)
 
     def test_platform_and_root_guards_remain_closed(self):
         self.installed()
@@ -490,15 +640,20 @@ exit 0
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path)
+    parser.add_argument('--bash', default=BASH, help='Shell running the manager (e.g. Bash 3.2)')
     parser.add_argument('--manager-source', type=Path, default=SCRIPT,
                         help='Test-only source override for historical counterprobes')
     args, remaining = parser.parse_known_args()
     SCRIPT = args.manager_source.resolve()
+    BASH = str(Path(shutil.which(args.bash) or args.bash).resolve())
+    bash_version = subprocess.run([BASH, '--version'], check=True, capture_output=True,
+                                  text=True).stdout.splitlines()[0]
     suite = unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, exit=False)
     if args.evidence:
         args.evidence.parent.mkdir(parents=True, exist_ok=True)
         args.evidence.write_text(json.dumps(dict(
-            scope='Linux sandbox; substituted OS/HAL commands, NOT native acceptance',
+            scope='Sandbox; substituted OS/HAL commands, NOT native acceptance',
+            bash=BASH, bash_version=bash_version,
             manager_sha256=hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
             tests=suite.result.testsRun, failures=len(suite.result.failures),
             errors=len(suite.result.errors), records=RECORDS), indent=2) + '\n')
