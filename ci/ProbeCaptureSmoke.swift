@@ -22,10 +22,11 @@ final class Blocks {
     deinit { memory.forEach { $0.deallocate() }; free(list.unsafeMutablePointer) }
 }
 
-final class EngineChanges { var count = 0 }
+final class EngineChanges { var count = 0; var firstAt = 0.0; var text = "not_observed" }
 
 @main struct ProbeCaptureSmoke {
     static var passed: [String] = []
+    static var failures: [String] = []
     static func check(_ ok: Bool, _ name: String) {
         guard ok else {
             FileHandle.standardError.write(Data(("FAILED: " + name + "\n").utf8))
@@ -154,20 +155,41 @@ final class EngineChanges { var count = 0 }
         guard let session = try? CaptureSession() else { fatalError("session") }
         let hal = HALCapture(device: d, channel: 0, session: session)
         let notified = EngineChanges()
-        do { try hal.start { notified.count += 1 } } catch { out["status"] = "HAL_START_FAILED: \(error.localizedDescription)"; return out }
+        // Same drain the app runs: producer never meets a full queue.
+        let worker = DispatchQueue(label: "smoke.pump")
+        let pump = DispatchSource.makeTimerSource(queue: worker)
+        let handle = session.handle
+        pump.schedule(deadline: .now(), repeating: .milliseconds(5))
+        pump.setEventHandler { _ = np_pump(handle) }
+        pump.resume()
+        do { try hal.start { notified.count += 1 } } catch {
+            pump.cancel(); out["status"] = "HAL_START_FAILED: \(error.localizedDescription)"
+            failures.append(d.name + ": HAL start failed"); return out
+        }
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
         let stillSame = ProbeGuard.difference(from: snap, to: ProbeInput.snapshot(d.deviceID))
-        hal.stop()
-        out["hal"] = ["blocks": np_blocks(session.handle), "frames": np_received(session.handle),
-                      "error": Int(np_error(session.handle)), "hal_notifications": notified.count,
+        hal.stop(); pump.cancel(); worker.sync {}
+        let blocks = np_blocks(handle), frames = np_received(handle), error = Int(np_error(handle))
+        out["hal"] = ["blocks": blocks, "frames": frames, "error": error, "hal_notifications": notified.count,
                       "state_difference": stillSame ?? "none"] as [String: Any]
+        // Real device, real clock: contiguous device sample times, ~1.5 s of frames, no discard.
+        if blocks == 0 || error != 0 || frames < 48000 || stillSame != nil {
+            failures.append("\(d.name): live HAL capture blocks=\(blocks) frames=\(frames) error=\(error) difference=\(stillSame ?? "none")")
+        }
         // Historical path, diagnostic only: AVAudioEngine bound to the same device.
-        let engine = AVAudioEngine(), changes = EngineChanges()
+        let engine = AVAudioEngine(), changes = EngineChanges(), taps = EngineChanges()
+        let begin = ProcessInfo.processInfo.systemUptime
         let observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
-                                                              object: engine, queue: .main) { _ in changes.count += 1 }
+                                                              object: engine, queue: .main) { _ in
+            if changes.count == 0 {
+                changes.firstAt = ProcessInfo.processInfo.systemUptime - begin
+                changes.text = ProbeGuard.difference(from: snap, to: ProbeInput.snapshot(d.deviceID)) ?? "none"
+            }
+            changes.count += 1
+        }
         let bound = (try? ProbeInput.bind(engine.inputNode, to: d, input: true)) != nil
         let bus = engine.inputNode.outputFormat(forBus: 0)
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: bus) { _, _ in }
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: bus) { _, _ in taps.count += 1 }
         engine.prepare()
         let started = (try? engine.start()) != nil
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -175,7 +197,9 @@ final class EngineChanges { var count = 0 }
         NotificationCenter.default.removeObserver(observer)
         out["legacy_engine"] = ["bound": bound, "started": started, "bus_channels": Int(bus.channelCount),
                                 "bus_rate": Int(bus.sampleRate), "hal_channels": d.channels,
-                                "config_changes": changes.count] as [String: Any]
+                                "config_changes": changes.count, "first_change_after_s": changes.firstAt,
+                                "tap_buffers": taps.count,
+                                "state_difference_at_first_change": changes.text] as [String: Any]
         out["status"] = "LIVE_HARDWARE_EXERCISED"
         return out
     }
@@ -199,5 +223,9 @@ final class EngineChanges { var count = 0 }
         guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { fatalError("report") }
         print(text)
+        if !failures.isEmpty {
+            FileHandle.standardError.write(Data(("FAILED hardware: " + failures.joined(separator: "; ") + "\n").utf8))
+            exit(1)
+        }
     }
 }
