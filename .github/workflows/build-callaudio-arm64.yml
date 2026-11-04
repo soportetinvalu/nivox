@@ -30,6 +30,8 @@ jobs:
         run: python3 tests/test_call_ui_diagnostics.py
       - name: E2E diagnostic classification regression (failures stay failures)
         run: python3 callaudio/tests/test_e2e_classification.py
+      - name: Raw E2E generated-window regression (real generator, synthetic transport, cut counterprobes)
+        run: python3 callaudio/tests/test_e2e_tone.py --out build/e2e-tone-regression
       - name: Call controller lifecycle (release, ASan+UBSan, readiness counterprobe)
         run: python3 tests/test_call_audio.py --out build/call-ui-control
       - name: Core tests (release + RT allocation guard, ASan+UBSan, TSan)
@@ -51,6 +53,8 @@ jobs:
             build/callaudio-linux/test_core_tsan
             build/call-ui-control/report.json
             build/call-ui-control/commands.log
+            build/e2e-tone-regression/report.json
+            build/e2e-tone-regression/commands.log
           if-no-files-found: error
           retention-days: 7
   mac-arm64:
@@ -75,6 +79,8 @@ jobs:
           [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]] || { echo 'refusing: runner already has Nivox installed'; exit 1; }
       - name: Swift C lifecycle type regression (real compiler, positive and negative cases)
         run: python3 tests/test_call_lifecycle_swift.py --out build/lifecycle-swift-mac
+      - name: Raw E2E generated-window regression (native compiler, synthetic transport)
+        run: python3 callaudio/tests/test_e2e_tone.py --out build/e2e-tone-regression-mac
       - name: Require Apple Silicon, build app + driver + engine, sign ad hoc, package
         id: mac_build
         shell: bash
@@ -204,6 +210,8 @@ jobs:
             build/callaudio-mac/app-build/commands.log
             build/lifecycle-swift-mac/report.json
             build/lifecycle-swift-mac/commands.log
+            build/e2e-tone-regression-mac/report.json
+            build/e2e-tone-regression-mac/commands.log
             build/ui-mac-absent/
             build/ui-mac-present/
           if-no-files-found: warn

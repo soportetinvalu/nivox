@@ -12,6 +12,7 @@
  */
 #include "nv_path.h"
 #include "nv_signal.h"
+#include "nv_e2e_tone.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@ typedef struct {
     int mode; double rate; double phase; float amp; uint32_t seed;
     uint64_t frames, impulse_after; _Atomic uint64_t impulse_ns; int impulse_done;
     double next_sample_time;
+    int marked_tone; /* raw loopback only: do not mark processed engine paths */
     uint64_t timestamp_jumps, callbacks;
     double max_timestamp_jump;
 } gen_t;
@@ -61,6 +63,7 @@ static void gen_cb(void *ctx, float *d, uint32_t n, uint32_t ch, const AudioTime
             uint64_t base = (ts && (ts->mFlags & kAudioTimeStampHostTimeValid)) ? nv_host_to_ns(ts->mHostTime) : 0;
             atomic_store(&g->impulse_ns, base + (uint64_t)(i * 1e9 / g->rate));
         }
+        if (g->marked_tone) x = nv_e2e_mark_tone(g->frames + i, x);
         for (uint32_t c = 0; c < ch; c++) d[(size_t)i * ch + c] = x;
     }
     g->frames += n;
@@ -159,10 +162,10 @@ static void dump_capture(const rec_t *r, const gen_t *g) {
     f = fopen(path, "w");
     if (!f) { perror(path); failures++; return; }
     fprintf(f, "{\"mode\":%d,\"rate\":%.0f,\"recorded\":%zu,\"generated\":%llu,"
-               "\"generator_callbacks\":%llu,\"generator_timestamp_jumps\":%llu,"
+               "\"marked_tone\":%d,\"generator_callbacks\":%llu,\"generator_timestamp_jumps\":%llu,"
                "\"generator_max_timestamp_jump\":%.3f,\"capture_callbacks\":%zu}\n",
             g->mode, r->rate, r->len, (unsigned long long)g->frames,
-            (unsigned long long)g->callbacks, (unsigned long long)g->timestamp_jumps,
+            g->marked_tone, (unsigned long long)g->callbacks, (unsigned long long)g->timestamp_jumps,
             g->max_timestamp_jump, r->ncb);
     if (fclose(f)) failures++;
 }
@@ -226,16 +229,20 @@ int main(void) {
 
     printf(",\"tests\":{");
     rec_t r; gen_t g; analysis a;
+    nv_e2e_tone_analysis tone;
     /* 2. raw loopback mic pair: tone */
-    rec_init(&r, 4, 48000); memset(&g, 0, sizeof g); g.mode = GEN_SINE; g.amp = 0.25f;
+    rec_init(&r, 4, 48000); memset(&g, 0, sizeof g); g.mode = GEN_SINE; g.amp = 0.25f; g.marked_tone = 1;
     run(feed, 1, &g, mic, 1, &r, 3.5);
-    a = analyze(&r, 0.03f);
-    printf("\"mic_loopback_tone\":{\"rms\":%.4f,\"freq\":%.2f,\"glitches\":%llu,\"onset_s\":%.3f,\"samples\":%zu}",
-           a.rms, a.freq, (unsigned long long)a.glitches, a.onset_s, r.len);
-    EXPECT(a.n > 0, "mic loopback captured signal (silence => TCC/routing)", a.rms);
-    EXPECT(fabs(20 * log10(a.rms / (0.25 / sqrt(2)) + 1e-12)) < 1.0, "mic loopback level dB", 20 * log10(a.rms / (0.25 / sqrt(2)) + 1e-12));
-    EXPECT(fabs(a.freq - 1000) < 1.0, "mic loopback freq", a.freq);
-    EXPECT(a.glitches == 0, "mic loopback glitches", a.glitches);
+    tone = nv_e2e_analyze_tone(r.buf, r.len, r.rate, g.frames, 0.03f);
+    printf("\"mic_loopback_tone\":{\"rms\":%.4f,\"freq\":%.2f,\"glitches\":%llu,\"onset_s\":%.3f,\"samples\":%zu,"
+           "\"window_valid\":%s,\"marker_count\":%zu,\"marker_index\":%zu,\"analysis_start\":%zu,\"analysis_end\":%zu,\"generated\":%llu}",
+           tone.rms, tone.freq, (unsigned long long)tone.glitches, tone.onset_s, r.len,
+           tone.window_valid ? "true" : "false", tone.marker_count, tone.marker_index, tone.start, tone.end, (unsigned long long)g.frames);
+    EXPECT(tone.window_valid, "mic loopback generated window", tone.marker_count);
+    EXPECT(tone.n > 0, "mic loopback captured signal (silence => TCC/routing)", tone.rms);
+    EXPECT(fabs(20 * log10(tone.rms / (0.25 / sqrt(2)) + 1e-12)) < 1.0, "mic loopback level dB", 20 * log10(tone.rms / (0.25 / sqrt(2)) + 1e-12));
+    EXPECT(fabs(tone.freq - 1000) < 1.0, "mic loopback freq", tone.freq);
+    EXPECT(tone.glitches == 0, "mic loopback glitches", tone.glitches);
     rec_free(&r);
 
     /* latency through the driver alone (host-time based) */
@@ -248,12 +255,15 @@ int main(void) {
     rec_free(&r);
 
     /* 3. raw loopback speaker pair (stereo) */
-    rec_init(&r, 4, 48000); memset(&g, 0, sizeof g); g.mode = GEN_SINE; g.amp = 0.25f;
+    rec_init(&r, 4, 48000); memset(&g, 0, sizeof g); g.mode = GEN_SINE; g.amp = 0.25f; g.marked_tone = 1;
     run(spk, 2, &g, ret, 2, &r, 3.5);
-    a = analyze(&r, 0.03f);
-    printf(",\"speaker_loopback_tone\":{\"rms\":%.4f,\"freq\":%.2f,\"glitches\":%llu,\"channel_mismatch\":%llu}",
-           a.rms, a.freq, (unsigned long long)a.glitches, (unsigned long long)r.channel_mismatch);
-    EXPECT(a.n > 0 && fabs(a.freq - 1000) < 1.0 && a.glitches == 0, "speaker loopback tone", a.freq);
+    tone = nv_e2e_analyze_tone(r.buf, r.len, r.rate, g.frames, 0.03f);
+    printf(",\"speaker_loopback_tone\":{\"rms\":%.4f,\"freq\":%.2f,\"glitches\":%llu,\"channel_mismatch\":%llu,"
+           "\"window_valid\":%s,\"marker_count\":%zu,\"marker_index\":%zu,\"analysis_start\":%zu,\"analysis_end\":%zu,\"generated\":%llu}",
+           tone.rms, tone.freq, (unsigned long long)tone.glitches, (unsigned long long)r.channel_mismatch,
+           tone.window_valid ? "true" : "false", tone.marker_count, tone.marker_index, tone.start, tone.end, (unsigned long long)g.frames);
+    EXPECT(tone.window_valid, "speaker loopback generated window", tone.marker_count);
+    EXPECT(tone.n > 0 && fabs(tone.freq - 1000) < 1.0 && tone.glitches == 0, "speaker loopback tone", tone.freq);
     EXPECT(r.channel_mismatch == 0, "speaker stereo channels identical", r.channel_mismatch);
     rec_free(&r);
 
