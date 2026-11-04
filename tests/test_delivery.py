@@ -129,6 +129,8 @@ class DeliveryTests(unittest.TestCase):
         required = {'callaudio/core/nv_watch.h', 'callaudio/core/nv_signal.h',
                     'callaudio/mac/audio-input.entitlements', 'callaudio/control/nv_call_ui.h',
                     'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
+                    'callaudio/installer/nv_driver_state.c',
+                    'callaudio/tests/test_driver_state.py',
                     'callaudio/tests/test_installer.py', 'callaudio/tests/test_mac_clock.c',
                     'callaudio/tests/test_call_mac_contract.c', 'tests/test_call_lifecycle_swift.py'}
         self.assertTrue(required <= set(payload))

@@ -19,7 +19,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Installer transaction regression tests (sandbox, no HAL installation)
-        run: python3 callaudio/tests/test_installer.py
+        run: python3 callaudio/tests/test_installer.py --evidence build/installer-sandbox.json
+      - name: HAL probe decision logic (synthetic API, not Apple SDK or native acceptance)
+        run: python3 callaudio/tests/test_driver_state.py
       - name: Pinned dependency compatibility regression (no SDK or installation)
         run: python3 callaudio/tests/test_build_compat.py
       - name: CLI recovery verifier (real Mac stderr and negative probes)
@@ -39,6 +41,7 @@ jobs:
           name: nivox-callaudio-linux-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/callaudio-linux/report.json
+            build/installer-sandbox.json
             build/callaudio-linux/commands.log
             build/callaudio-linux/SHA256SUMS
             build/callaudio-linux/test_call_control

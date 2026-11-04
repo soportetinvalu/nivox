@@ -244,6 +244,14 @@ def mac(run, out, report):
         if ent.get('com.apple.security.device.audio-input') is not True:
             raise RuntimeError(f'{name}: signed audio-input entitlement missing')
         tools[name]['audio_input_entitlement'] = True
+    # Separate read-only installer probe: no capture/audio-input entitlement.
+    probe = out / 'nv-driver-state'
+    run([cc, '-O2', *target, *WARN, CA / 'installer/nv_driver_state.c',
+         '-framework', 'CoreAudio', '-framework', 'CoreFoundation', '-o', probe])
+    tools[probe.name] = audit_macho(run, probe)
+    tools[probe.name]['audio_input_entitlement'] = False
+    run(['codesign', '--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', probe])
+    run(['codesign', '--verify', '--strict', probe])
     # Compile/audit the real UI before running timing-sensitive core tests.
     # A core failure must not conceal Swift compilation or signing failures.
     report['tools'] = tools
@@ -286,7 +294,8 @@ def mac(run, out, report):
         binary = extracted / name
         run(['codesign', '--verify', '--strict', binary])
         audit_macho(run, binary)
-        verify_audio_entitlement(run, binary)
+        if tools[name]['audio_input_entitlement']:
+            verify_audio_entitlement(run, binary)
     def hashes(folder):
         return {str(p.relative_to(folder)): digest(p) for p in sorted(folder.rglob('*')) if p.is_file()}
     if hashes(stage) != hashes(extracted):

@@ -33,11 +33,14 @@ FILES = [
     'vendor/libASPL-3.1.2.tar.gz', '.github/workflows/build-callaudio-arm64.yml',
     'callaudio/core/nv_watch.h', 'callaudio/core/nv_signal.h', 'callaudio/mac/audio-input.entitlements',
     'callaudio/installer/manage-driver.sh', 'callaudio/installer/restore-driver.sh',
+    'callaudio/installer/nv_driver_state.c',
+    'callaudio/tests/test_driver_state.py',
     'callaudio/tests/test_mac_clock.c', 'callaudio/tests/test_installer.py',
     'callaudio/tests/test_build_compat.py',
     'callaudio/tests/test_call_mac_contract.c',
     'tests/test_call_lifecycle_swift.py',
     'docs/CALL_AUDIO_SAFE_INTEGRATION.md', 'docs/CALL_AUDIO_SAFE_EVIDENCE.json',
+    'docs/INSTALLER_TRANSACTION_FIX.md',
 ]
 
 
