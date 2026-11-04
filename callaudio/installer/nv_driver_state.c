@@ -7,6 +7,16 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void deadline_exceeded(int signal_number) {
+    (void)signal_number;
+    /* Only async-signal-safe operations, including when HAL is blocked. */
+    static const char message[] = "HAL probe exceeded five-second deadline\n";
+    (void)write(STDERR_FILENO, message, sizeof message - 1);
+    _exit(124);
+}
 
 static AudioObjectPropertyAddress address(AudioObjectPropertySelector selector) {
     AudioObjectPropertyAddress a = {selector, kAudioObjectPropertyScopeGlobal,
@@ -42,6 +52,8 @@ static int lookup(const char *uid, AudioObjectID *device) {
 }
 
 int main(int argc, char **argv) {
+    if (signal(SIGALRM, deadline_exceeded) == SIG_ERR) return 2;
+    alarm(5); /* A hung CoreAudio IPC must not hold the transaction forever. */
     if (argc != 2 || (strcmp(argv[1], "present") && strcmp(argv[1], "absent"))) {
         fprintf(stderr, "Usage: nv-driver-state present|absent\n");
         return 2;

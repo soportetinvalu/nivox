@@ -14,6 +14,16 @@ for p in /Library /Library/Audio /Library/Audio/Plug-Ins "$hal"; do
     [[ -d "$p" && ! -L "$p" ]] || { echo "Unsafe directory: $p" >&2; exit 1; }
 done
 [[ ! -L "$dst" && ( ! -e "$dst" || -d "$dst" ) ]] || { echo 'Unsafe installed bundle' >&2; exit 1; }
+mode="${1:-}"
+# Stable UIDs cannot identify the loaded binary, and killall is asynchronous.
+# Refuse replacement BEFORE creating history/lock or touching any system state.
+reject_replacement() {
+    if [[ ( "$mode" == install || "$mode" == restore ) && -e "$dst" ]]; then
+        echo 'Replacement refused: loaded driver version cannot be verified; installed driver was not changed' >&2
+        exit 1
+    fi
+}
+reject_replacement
 if [[ -e "$history" || -L "$history" ]]; then
     [[ -d "$history" && ! -L "$history" && "$(/usr/bin/stat -f '%u:%Lp' "$history")" == 0:700 ]] || { echo 'Unsafe backup directory' >&2; exit 1; }
 else
@@ -22,9 +32,17 @@ fi
 mkdir "$lock" || { echo 'Another transaction or stale lock exists; inspect before retrying' >&2; exit 1; }
 txn=''; old=0; published=0; committed=0; changed=0; probe=''
 wait_for_hal() {
-    local expected="$1" phase="$2" attempt
-    for ((attempt=0; attempt<40; attempt++)); do
-        if "$probe" "$expected" > "$txn/$phase-hal-state.log" 2>&1; then return 0; fi
+    local expected="$1" phase="$2" attempt rc deadline=$((SECONDS+40))
+    # The signed C probe arms a five-second alarm before making any HAL call.
+    # Also cap elapsed polling time, not just the number of failed queries.
+    for ((attempt=0; attempt<40 && SECONDS<deadline; attempt++)); do
+        if "$probe" "$expected" > "$txn/$phase-hal-state.log" 2>&1; then return 0;
+        else rc=$?; fi
+        if [[ "$rc" == 124 ]]; then
+            echo "HAL probe exceeded its five-second deadline: $txn/$phase-hal-state.log" >&2
+            return 1
+        fi
+        [[ "$SECONDS" -lt "$deadline" ]] || break
         /bin/sleep 1
     done
     echo "HAL state verification timed out (expected $expected): $txn/$phase-hal-state.log" >&2
@@ -42,7 +60,10 @@ restart_and_verify() {
 }
 finish() {
     rc=$?
-    trap - EXIT HUP INT TERM
+    trap - EXIT
+    # Ignore catchable termination signals through recovery AND lock release.
+    # Children inherit ignored signals, so repeated Ctrl-C cannot kill ditto.
+    trap '' HUP INT TERM
     if [[ "$committed" == 0 && -n "$txn" ]]; then
         [[ "$rc" != 0 ]] || rc=1
         recovery_failed=0
@@ -50,9 +71,14 @@ finish() {
             mv "$dst" "$txn/failed.driver" || recovery_failed=1
         fi
         if [[ "$old" == 1 && -e "$txn/previous.driver" && ! -e "$dst" ]]; then
-            # Keep the original backup even after a failed transaction.
-            if /usr/bin/ditto "$txn/previous.driver" "$txn/recovery.driver"; then
-                mv "$txn/recovery.driver" "$dst" || recovery_failed=1
+            # Prefer a copy so the original backup normally remains available.
+            if /usr/bin/ditto "$txn/previous.driver" "$txn/recovery.driver" &&
+               mv "$txn/recovery.driver" "$dst"; then
+                :
+            elif [[ ! -e "$dst" ]] && mv "$txn/previous.driver" "$dst"; then
+                # Same-filesystem rename can rescue the original on ENOSPC.
+                # Never publish the partial recovery copy or delete evidence.
+                echo 'Recovery copy failed; original rescued by rename; previous.driver backup consumed' >&2
             else
                 recovery_failed=1
             fi
@@ -74,7 +100,6 @@ finish() {
 }
 trap finish EXIT
 trap 'exit 130' HUP INT TERM
-mode="${1:-}"
 case "$mode" in
     install) src="${2:?Missing source bundle}" ;;
     restore)
@@ -113,10 +138,13 @@ if [[ -n "$src" ]]; then
     /bin/chmod -R go-w "$txn/candidate.driver"
     /usr/bin/codesign --verify --strict "$txn/candidate.driver"
 fi
+# Recheck under the lock: another transaction may have finished since preflight.
+reject_replacement
 if [[ -e "$dst" ]]; then
     old=1
-    mv "$dst" "$txn/previous.driver"
+    # Mark intent first: a signal immediately after mv must still recover it.
     changed=1
+    mv "$dst" "$txn/previous.driver"
 fi
 if [[ -n "$src" ]]; then
     published=1

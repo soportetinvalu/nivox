@@ -21,7 +21,7 @@ jobs:
       - name: Installer transaction regression tests (sandbox, no HAL installation)
         run: python3 callaudio/tests/test_installer.py --evidence build/installer-sandbox.json
       - name: HAL probe decision logic (synthetic API, not Apple SDK or native acceptance)
-        run: python3 callaudio/tests/test_driver_state.py
+        run: python3 callaudio/tests/test_driver_state.py --evidence build/driver-state-synthetic.json
       - name: Pinned dependency compatibility regression (no SDK or installation)
         run: python3 callaudio/tests/test_build_compat.py
       - name: CLI recovery verifier (real Mac stderr and negative probes)
@@ -42,6 +42,7 @@ jobs:
           path: |
             build/callaudio-linux/report.json
             build/installer-sandbox.json
+            build/driver-state-synthetic.json
             build/callaudio-linux/commands.log
             build/callaudio-linux/SHA256SUMS
             build/callaudio-linux/test_call_control
@@ -93,14 +94,24 @@ jobs:
           [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]] || { echo 'refusing: only on GitHub-hosted runners'; exit 1; }
           out=build/callaudio-mac
           stage="$out/zip-extracted/Nivox-CallAudio"
-          sudo bash "$stage/install-driver.sh" | tee "$out/install.log"
           mkdir "$out/invalid.driver"
           if sudo bash "$stage/manage-driver.sh" install "$out/invalid.driver" > "$out/rejected-install.log" 2>&1; then
             echo 'invalid unsigned candidate was accepted'; exit 1
           fi
+          [[ ! -e /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver ]]
+          sudo bash "$stage/install-driver.sh" | tee "$out/install.log"
           sudo cmp "$out/NivoxAudio.driver/Contents/MacOS/NivoxAudio" /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver/Contents/MacOS/NivoxAudio
-          sudo bash "$stage/install-driver.sh" | tee "$out/replace.log"
-          backup="$(python3 -c 'import re,sys; print(re.search(r"retained backup: (.*)", open(sys.argv[1]).read())[1])' "$out/replace.log")"
+          # Stable UIDs cannot prove the loaded version. Replacement must reject
+          # even a valid candidate; do not bypass this guard to test an update.
+          if sudo bash "$stage/install-driver.sh" > "$out/replace-rejected.log" 2>&1; then
+            echo 'unverifiable replacement was accepted'; exit 1
+          fi
+          grep -q 'loaded driver version cannot be verified' "$out/replace-rejected.log"
+          sudo cmp "$out/NivoxAudio.driver/Contents/MacOS/NivoxAudio" /Library/Audio/Plug-Ins/HAL/NivoxAudio.driver/Contents/MacOS/NivoxAudio
+          # Exercise protected removal and restoration of this SAME build only.
+          # This is not an update or proof of loaded-binary identity.
+          sudo bash "$stage/uninstall-driver.sh" | tee "$out/remove-before-restore.log"
+          backup="$(python3 -c 'import re,sys; print(re.search(r"retained backup: (.*)", open(sys.argv[1]).read())[1])' "$out/remove-before-restore.log")"
           sudo test -d "$backup"
           sudo bash "$stage/restore-driver.sh" "$backup" | tee "$out/restore.log"
           sudo test -d "$backup"

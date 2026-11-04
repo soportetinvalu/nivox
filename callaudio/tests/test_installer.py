@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Exercise the real transaction shell in a sandbox, not a macOS/HAL test.
-
-Only OS commands and the /Library root are substituted. Every mutation occurs
-inside build/; production scripts have no environment-variable path overrides.
-"""
+"""Real transaction shell, substituted OS/HAL commands: NOT macOS acceptance."""
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 import sys
 
@@ -35,7 +35,7 @@ class InstallerTests(unittest.TestCase):
         self.dst = self.hal / 'NivoxAudio.driver'
         self.bin = self.base / 'bin'
         self.bin.mkdir()
-        self.env = dict(PATH=str(self.bin) + ':/usr/bin:/bin', LC_ALL='C')
+        self.env = dict(PATH=str(self.bin) + ':/usr/bin:/bin', LC_ALL='C', STATE=str(self.base))
         commands = {
             'uname': 'if [ "$1" = -s ]; then echo Darwin; else echo arm64; fi',
             'id': 'echo 0',
@@ -54,9 +54,8 @@ n=0
 n=$((n+1)); printf '%s' "$n" > "$STATE/count"
 [ "$n" != "${FAIL_VERIFY:-0}" ]''',
         }
-        self.env['STATE'] = str(self.base)
         text = SCRIPT.read_text().replace('/Library', str(self.library))
-        # Only the sandbox copy gains a test PATH; never an override in production.
+        # Only the disposable sandbox gains a PATH override.
         text = text.replace('export PATH=/usr/bin:/bin:/usr/sbin:/sbin',
                             'export PATH=' + str(self.bin) + ':/usr/bin:/bin')
         for cmd, body in commands.items():
@@ -87,19 +86,23 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_manager(self, *args, fail_verify=0, fail_restart: int | str = 0, fail_load: int | str = 0):
-        # Count driver signature checks separately from the new helper checks.
-        (self.base / 'count').unlink(missing_ok=True)
-        (self.base / 'restarts').unlink(missing_ok=True)
+    def record(self, p, args):
+        RECORDS.append(dict(test=self.id(), args=list(map(str, args)), rc=p.returncode,
+                            stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
+                            lock=(self.hal / '.NivoxAudio.lock').exists(),
+                            previous={str(b): hashes(b) for b in self.previous()},
+                            failed={str(b): hashes(b) for b in self.failed()}))
+        return p
+
+    def run_manager(self, *args, fail_verify: int | str = 0,
+                    fail_restart: int | str = 0, fail_load: int | str = 0):
+        for name in ['count', 'restarts']:
+            (self.base / name).unlink(missing_ok=True)
         p = subprocess.run(['bash', str(self.script), *map(str, args)],
                            env=dict(self.env, FAIL_VERIFY=str(fail_verify),
                                     FAIL_RESTART=str(fail_restart), FAIL_LOAD=str(fail_load)),
                            text=True, capture_output=True, timeout=15)
-        RECORDS.append(dict(test=self.id(), args=list(map(str, args)), rc=p.returncode,
-                            stdout=p.stdout, stderr=p.stderr, installed=hashes(self.dst),
-                            previous={str(b): hashes(b) for b in self.previous()},
-                            failed={str(b): hashes(b) for b in self.failed()}))
-        return p
+        return self.record(p, args)
 
     def previous(self):
         return list((self.library / 'Audio/.NivoxAudio-history').glob('transaction.*/previous.driver'))
@@ -118,50 +121,87 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
         (self.dst / 'Contents/MacOS').mkdir(parents=True)
         (self.dst / 'Contents/MacOS/NivoxAudio').write_bytes(b'\x00sandbox-version-A\xfe')
 
-    def test_replace_and_restore_retain_both_versions(self):
+    def test_update_and_restore_refused_before_any_system_mutation(self):
         self.installed()
-        original, candidate = hashes(self.dst), hashes(self.src)
-        self.assertNotEqual(original, candidate)
+        before = hashes(self.library)
+        # The old daemon could satisfy every stable UID while B never loads.
+        self.helper.write_text('#!/bin/bash\ntouch "$STATE/probe-called"\nexit 0\n')
+        for mode in ['install', 'restore']:
+            with self.subTest(mode=mode):
+                p = self.run_manager(mode, self.src)
+                self.assert_failed(p)
+                self.assertIn('loaded driver version cannot be verified', p.stderr)
+                self.assertEqual(hashes(self.library), before)
+                self.assertFalse((self.library / 'Audio/.NivoxAudio-history').exists())
+                for name in ['restarts', 'count', 'probe-called']:
+                    self.assertFalse((self.base / name).exists(), name)
+
+    def test_initial_install_succeeds_without_identity_claim(self):
         p = self.run_manager('install', self.src)
         self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(hashes(self.dst), hashes(self.src))
+        self.assertIn('HAL presence verified', p.stdout)
+        self.assertFalse(self.previous())
+
+    def test_managed_restore_to_occupied_path_is_also_rejected_without_mutation(self):
+        self.installed()
+        backup = self.library / 'Audio/.NivoxAudio-history/transaction.fixture/previous.driver'
+        shutil.copytree(self.src, backup)
+        before = hashes(self.library)
+        entries = sorted(str(p.relative_to(self.library)) for p in self.library.rglob('*'))
+        p = self.run_manager('restore', backup)
+        self.assert_failed(p)
+        self.assertIn('loaded driver version cannot be verified', p.stderr)
+        self.assertEqual(hashes(self.library), before)
+        self.assertEqual(sorted(str(p.relative_to(self.library)) for p in self.library.rglob('*')), entries)
+        self.assertFalse((self.base / 'restarts').exists())
+
+    def test_signal_immediately_after_displacement_still_recovers_original(self):
+        self.installed()
+        original = hashes(self.dst)
+        move = self.bin / 'mv'
+        move.write_text('''#!/bin/bash
+/bin/mv "$@" || exit $?
+case "$2" in */previous.driver) kill -TERM "$PPID";; esac
+''')
+        move.chmod(0o755)
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
+        self.assertEqual(p.returncode, 130)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertIn('state restored', p.stderr)
+
+    def test_uninstall_then_restore_preserves_original_backup(self):
+        self.installed()
+        original = hashes(self.dst)
+        p = self.run_manager('uninstall')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(self.dst.exists())
         backup = self.previous()[0]
-        self.assertEqual((backup / 'marker').read_text(), 'original')
-        self.assertEqual((self.dst / 'marker').read_text(), 'candidate')
+        self.assertEqual(hashes(backup), original)
         p = self.run_manager('restore', backup)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual((self.dst / 'marker').read_text(), 'original')
-        self.assertTrue(backup.exists())
-        self.assertIn('candidate', [(p / 'marker').read_text() for p in self.previous()])
         self.assertEqual(hashes(self.dst), original)
         self.assertEqual(hashes(backup), original)
-        displaced = next(b for b in self.previous() if hashes(b) == candidate)
-        p = self.run_manager('restore', displaced)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(hashes(self.dst), candidate)
-        self.assertEqual(hashes(displaced), candidate)
-        self.assertIn(original, [hashes(b) for b in self.previous()])
 
     def test_restart_failure_rolls_back_and_never_completes(self):
         self.installed()
-        original, candidate = hashes(self.dst), hashes(self.src)
-        p = self.run_manager('install', self.src, fail_restart=1)
+        original = hashes(self.dst)
+        p = self.run_manager('uninstall', fail_restart=1)
         self.assert_failed(p)
         self.assertEqual(p.returncode, 7)
         self.assertIn('CoreAudio restart failed (exit 7)', p.stderr)
         self.assertIn('Previous filesystem and HAL presence state restored', p.stderr)
         self.assertEqual(hashes(self.dst), original)
         self.assertEqual([hashes(b) for b in self.previous()], [original])
-        self.assertEqual([hashes(b) for b in self.failed()], [candidate])
 
     def test_load_failure_rolls_back_and_retains_failure_log(self):
         self.installed()
-        original, candidate = hashes(self.dst), hashes(self.src)
-        p = self.run_manager('install', self.src, fail_load=1)
+        original = hashes(self.dst)
+        p = self.run_manager('uninstall', fail_load=1)
         self.assert_failed(p)
-        self.assertIn('HAL state verification timed out (expected present)', p.stderr)
+        self.assertIn('HAL state verification timed out (expected absent)', p.stderr)
         self.assertEqual(hashes(self.dst), original)
-        self.assertEqual([hashes(b) for b in self.previous()], [original])
-        self.assertEqual([hashes(b) for b in self.failed()], [candidate])
         txn = self.previous()[0].parent
         self.assertIn('injected HAL query/state failure', (txn / 'transaction-hal-state.log').read_text())
         self.assertEqual((txn / 'recovery-hal-state.log').read_text(), '')
@@ -176,44 +216,28 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
                 self.assertEqual((self.base / 'probes').read_text().splitlines()[-1], 'absent')
                 self.assertIn(hashes(self.src), [hashes(b) for b in self.failed()])
 
-    def test_recovery_restart_failure_is_explicit_and_preserves_bundles(self):
+    def test_recovery_failures_remain_explicit(self):
         self.installed()
         original = hashes(self.dst)
-        p = self.run_manager('install', self.src, fail_restart='all')
-        self.assert_failed(p)
-        self.assertIn('RECOVERY UNVERIFIED', p.stderr)
-        self.assertNotIn('state restored', p.stderr)
-        self.assertEqual(hashes(self.dst), original)
-        self.assertEqual([hashes(b) for b in self.previous()], [original])
-        self.assertEqual([hashes(b) for b in self.failed()], [hashes(self.src)])
+        for failure in ['restart', 'load']:
+            with self.subTest(failure=failure):
+                p = self.run_manager('uninstall', **{'fail_' + failure: 'all'})
+                self.assert_failed(p)
+                self.assertIn('RECOVERY UNVERIFIED', p.stderr)
+                self.assertNotIn('state restored', p.stderr)
+                self.assertEqual(hashes(self.dst), original)
+                self.assertTrue(all(hashes(b) == original for b in self.previous()))
 
-    def test_recovery_load_failure_is_not_reported_as_restored(self):
-        self.installed()
-        p = self.run_manager('install', self.src, fail_load='all')
-        self.assert_failed(p)
-        self.assertIn('RECOVERY UNVERIFIED', p.stderr)
-        self.assertNotIn('state restored', p.stderr)
-
-    def test_failed_uninstall_restores_previous_and_keeps_backup(self):
+    def test_failed_restore_preserves_source_and_failed_candidate(self):
         self.installed()
         original = hashes(self.dst)
-        p = self.run_manager('uninstall', fail_load=1)
-        self.assert_failed(p)
-        self.assertIn('expected absent', p.stderr)
-        self.assertEqual(hashes(self.dst), original)
-        self.assertEqual([hashes(b) for b in self.previous()], [original])
-
-    def test_failed_restore_preserves_both_versions_and_source(self):
-        self.installed()
-        original, candidate = hashes(self.dst), hashes(self.src)
-        p = self.run_manager('install', self.src)
+        p = self.run_manager('uninstall')
         self.assertEqual(p.returncode, 0, p.stderr)
         backup = self.previous()[0]
         p = self.run_manager('restore', backup, fail_restart=1)
         self.assert_failed(p)
-        self.assertEqual(hashes(self.dst), candidate)
+        self.assertFalse(self.dst.exists())
         self.assertEqual(hashes(backup), original)
-        self.assertIn(candidate, [hashes(b) for b in self.previous()])
         self.assertEqual([hashes(b) for b in self.failed()], [original])
 
     def test_missing_or_symbolic_helper_rejected_without_displacement(self):
@@ -223,7 +247,7 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
         for symbolic in [False, True]:
             if symbolic:
                 self.helper.symlink_to('/bin/true')
-            p = self.run_manager('install', self.src)
+            p = self.run_manager('uninstall')
             self.assert_failed(p)
             self.assertIn('Missing or unsafe HAL state probe', p.stderr)
             self.assertEqual(hashes(self.dst), original)
@@ -232,7 +256,7 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
     def test_quarantined_or_unsigned_helper_rejected(self):
         self.installed()
         self.env['FAIL_HELPER_VERIFY'] = '9'
-        p = self.run_manager('install', self.src)
+        p = self.run_manager('uninstall')
         self.assert_failed(p)
         self.assertFalse(self.previous())
         self.env['FAIL_HELPER_VERIFY'] = '0'
@@ -243,14 +267,31 @@ else [ ! -e "$STATE/Library/Audio/Plug-Ins/HAL/NivoxAudio.driver" ]; fi
         self.assertFalse(self.previous())
 
     def test_failed_final_verification_rolls_back(self):
-        self.installed()
         p = self.run_manager('install', self.src, fail_verify=3)
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual((self.dst / 'marker').read_text(), 'original')
-        self.assertTrue(list((self.library / 'Audio/.NivoxAudio-history').glob('*/failed.driver')))
-        self.assertFalse((self.hal / '.NivoxAudio.lock').exists())
+        self.assert_failed(p)
+        self.assertFalse(self.dst.exists())
+        self.assertEqual([hashes(b) for b in self.failed()], [hashes(self.src)])
 
-    def test_failed_filesystem_recovery_preserves_original_backup(self):
+    def test_failed_recovery_copy_rescues_original_without_publishing_partial(self):
+        self.installed()
+        original = hashes(self.dst)
+        (self.bin / 'ditto').write_text('''#!/bin/bash
+case "$2" in */recovery.driver)
+    mkdir "$2"; echo partial > "$2/marker"
+    echo 'ditto: No space left on device' >&2; exit 1;; esac
+cp -R "$1" "$2"
+''')
+        p = self.run_manager('uninstall', fail_restart=1)
+        self.assert_failed(p)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertFalse(self.previous())
+        self.assertIn('original rescued by rename', p.stderr)
+        self.assertIn('backup consumed', p.stderr)
+        self.assertIn('state restored', p.stderr)
+        partial = list((self.library / 'Audio/.NivoxAudio-history').glob('*/recovery.driver/marker'))
+        self.assertEqual([p.read_text().strip() for p in partial], ['partial'])
+
+    def test_failed_recovery_copy_publication_rescues_original(self):
         self.installed()
         original = hashes(self.dst)
         move = self.bin / 'mv'
@@ -259,73 +300,191 @@ case "$1" in */recovery.driver) exit 8;; esac
 exec /bin/mv "$@"
 ''')
         move.chmod(0o755)
-        p = self.run_manager('install', self.src, fail_restart=1)
+        p = self.run_manager('uninstall', fail_restart=1)
         self.assert_failed(p)
-        self.assertIn('RECOVERY UNVERIFIED', p.stderr)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertFalse(self.previous())
+        self.assertIn('original rescued by rename', p.stderr)
+
+    def test_failed_rescue_keeps_original_and_marks_unverified(self):
+        self.installed()
+        original = hashes(self.dst)
+        move = self.bin / 'mv'
+        move.write_text('''#!/bin/bash
+case "$1" in */recovery.driver|*/previous.driver) exit 8;; esac
+exec /bin/mv "$@"
+''')
+        move.chmod(0o755)
+        p = self.run_manager('uninstall', fail_restart=1)
+        self.assert_failed(p)
+        self.assertFalse(self.dst.exists())
         self.assertEqual([hashes(b) for b in self.previous()], [original])
-        self.assertEqual([hashes(b) for b in self.failed()], [hashes(self.src)])
+        self.assertIn('RECOVERY UNVERIFIED', p.stderr)
+        self.assertNotIn('state restored', p.stderr)
+
+    def test_probe_timeout_is_not_retried_and_recovery_is_attempted(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.helper.write_text('''#!/bin/bash
+printf '%s\\n' "$1" >> "$STATE/probes"
+if [ "$(cat "$STATE/restarts")" = 1 ]; then exit 124; fi
+exit 0
+''')
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
+        self.assertIn('five-second deadline', p.stderr)
+        self.assertEqual((self.base / 'probes').read_text().splitlines(), ['absent', 'present'])
+        self.assertEqual(hashes(self.dst), original)
+
+    def test_elapsed_poll_budget_is_not_just_an_attempt_count(self):
+        # Shorten only the sandbox budget, never add an environment override.
+        text = self.script.read_text()
+        self.assertIn('deadline=$((SECONDS+40))', text)
+        self.script.write_text(text.replace('deadline=$((SECONDS+40))', 'deadline=$((SECONDS+1))'))
+        self.installed()
+        self.helper.write_text('''#!/bin/bash
+printf '%s\\n' "$1" >> "$STATE/probes"
+if [ "$(cat "$STATE/restarts")" = 1 ]; then /bin/sleep 0.25; exit 1; fi
+exit 0
+''')
+        start = time.monotonic()
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
+        self.assertIn('HAL state verification timed out', p.stderr)
+        self.assertLess(time.monotonic() - start, 4)
+        calls = (self.base / 'probes').read_text().splitlines()
+        self.assertLess(calls.count('absent'), 10)
+        self.assertEqual(calls[-1], 'present')
+
+    def wait_marker(self, marker, process):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (self.base / marker).exists():
+                return
+            if process.poll() is not None:
+                self.fail('manager exited before ' + marker)
+            time.sleep(0.01)
+        self.fail('manager did not reach ' + marker)
+
+    def test_repeated_signals_during_recovery_copy_release_lock(self):
+        # Parent-only and foreground-process-group delivery reproduce both audits.
+        for sig in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
+            for group in [False, True]:
+                with self.subTest(signal=sig.name, group=group):
+                    if not self.dst.exists():
+                        self.installed()
+                    original = hashes(self.dst)
+                    (self.base / 'copy-started').unlink(missing_ok=True)
+                    (self.bin / 'ditto').write_text('''#!/bin/bash
+case "$2" in */recovery.driver) touch "$STATE/copy-started"; /bin/sleep 0.25;; esac
+cp -R "$1" "$2"
+''')
+                    (self.base / 'restarts').unlink(missing_ok=True)
+                    p = subprocess.Popen(['bash', str(self.script), 'uninstall'],
+                        env=dict(self.env, FAIL_RESTART='1'), text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                    try:
+                        self.wait_marker('copy-started', p)
+                        for _ in range(2):
+                            if group:
+                                os.killpg(p.pid, sig)
+                            else:
+                                p.send_signal(sig)
+                            time.sleep(0.03)
+                        out, err = p.communicate(timeout=10)
+                    finally:
+                        if p.poll() is None:
+                            os.killpg(p.pid, signal.SIGKILL)
+                            p.communicate()
+                    result = subprocess.CompletedProcess(p.args, p.returncode, out, err)
+                    self.record(result, ['uninstall', sig.name, str(group)])
+                    self.assert_failed(result)
+                    self.assertEqual(hashes(self.dst), original)
+                    self.assertIn('state restored', err)
+                    self.assertIn('Transaction failed; preserved evidence', err)
+
+    def test_second_ctrl_c_during_recovery_probe_does_not_abort_cleanup(self):
+        self.installed()
+        original = hashes(self.dst)
+        self.helper.write_text('''#!/bin/bash
+n=$(cat "$STATE/restarts")
+touch "$STATE/probe-$n"
+if [ "$n" = 1 ]; then /bin/sleep 10; exit 1; fi
+/bin/sleep 0.25
+exit 0
+''')
+        p = subprocess.Popen(['bash', str(self.script), 'uninstall'], env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            self.wait_marker('probe-1', p)
+            os.killpg(p.pid, signal.SIGINT)
+            self.wait_marker('probe-2', p)
+            os.killpg(p.pid, signal.SIGINT)
+            out, err = p.communicate(timeout=10)
+        finally:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.communicate()
+        result = subprocess.CompletedProcess(p.args, p.returncode, out, err)
+        self.record(result, ['uninstall', 'double-Ctrl-C'])
+        self.assert_failed(result)
+        self.assertEqual(p.returncode, 130)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertIn('state restored', err)
 
     def test_platform_and_root_guards_remain_closed(self):
         self.installed()
         original = hashes(self.dst)
         (self.bin / 'uname').write_text('#!/bin/bash\necho Linux\n')
-        p = self.run_manager('install', self.src)
-        self.assertNotEqual(p.returncode, 0)
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
         self.assertIn('Requires Apple Silicon macOS', p.stderr)
         (self.bin / 'uname').write_text('#!/bin/bash\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n')
         (self.bin / 'id').write_text('#!/bin/bash\necho 501\n')
-        p = self.run_manager('install', self.src)
-        self.assertNotEqual(p.returncode, 0)
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
         self.assertIn('Run with sudo', p.stderr)
         self.assertEqual(hashes(self.dst), original)
-        self.assertFalse(self.previous())
 
     def test_source_and_installed_symlinks_are_rejected(self):
-        self.installed()
-        original = hashes(self.dst)
         link = self.base / 'source-link.driver'
         link.symlink_to(self.src, target_is_directory=True)
         p = self.run_manager('install', link)
         self.assert_failed(p)
         self.assertIn('Missing or unsafe source bundle', p.stderr)
-        self.assertEqual(hashes(self.dst), original)
+        self.assertFalse(self.dst.exists())
+        self.installed()
+        original = hashes(self.dst)
         self.dst.rename(self.base / 'retained.driver')
         self.dst.symlink_to(self.base / 'retained.driver', target_is_directory=True)
-        p = self.run_manager('install', self.src)
-        self.assertNotEqual(p.returncode, 0)
+        p = self.run_manager('uninstall')
+        self.assert_failed(p)
         self.assertIn('Unsafe installed bundle', p.stderr)
         self.assertEqual(hashes(self.base / 'retained.driver'), original)
 
     def test_unmanaged_restore_source_is_rejected(self):
-        self.installed()
         p = self.run_manager('restore', self.src)
         self.assert_failed(p)
         self.assertIn('Not a managed backup', p.stderr)
         self.assertFalse(self.previous())
 
-    def test_quarantine_rejected_without_mutation(self):
-        self.installed()
+    def test_quarantine_rejected_without_removing_attributes(self):
         (self.src / 'quarantine').touch()
         p = self.run_manager('install', self.src)
-        self.assertNotEqual(p.returncode, 0)
+        self.assert_failed(p)
         self.assertIn('Refusing quarantined', p.stderr)
-        self.assertEqual((self.dst / 'marker').read_text(), 'original')
-        self.assertTrue((self.src / 'quarantine').exists())
-        self.assertFalse(self.previous())
-
-    def test_uninstall_retains_recoverable_bundle(self):
-        self.installed()
-        p = self.run_manager('uninstall')
-        self.assertEqual(p.returncode, 0, p.stderr)
         self.assertFalse(self.dst.exists())
-        self.assertEqual((self.previous()[0] / 'marker').read_text(), 'original')
+        self.assertTrue((self.src / 'quarantine').exists())
 
     def test_lock_rejects_parallel_transaction(self):
         self.installed()
+        original = hashes(self.dst)
         (self.hal / '.NivoxAudio.lock').mkdir()
-        p = self.run_manager('install', self.src)
+        p = self.run_manager('uninstall')
         self.assertNotEqual(p.returncode, 0)
-        self.assertEqual((self.dst / 'marker').read_text(), 'original')
+        self.assertIn('Another transaction or stale lock', p.stderr)
+        self.assertEqual(hashes(self.dst), original)
+        self.assertTrue((self.hal / '.NivoxAudio.lock').exists())
 
 
 if __name__ == '__main__':

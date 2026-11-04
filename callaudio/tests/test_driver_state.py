@@ -7,18 +7,26 @@ presence still require an authorized Apple lab. No audio or host state is used.
 # SPDX-License-Identifier: MIT
 
 from pathlib import Path
+import argparse
+import hashlib
+import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / 'callaudio/installer/nv_driver_state.c'
+RECORDS = []
 HEADER = r'''
 #ifndef FAKE_HAL_H
 #define FAKE_HAL_H
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 typedef uint32_t UInt32;
 typedef uint32_t AudioObjectID;
 typedef uint32_t AudioObjectPropertySelector;
@@ -38,13 +46,16 @@ static void CFRelease(CFStringRef s) { (void)s; }
 static OSStatus AudioObjectGetPropertyDataSize(AudioObjectID d,
     const AudioObjectPropertyAddress *a, UInt32 n, const void *q, UInt32 *size) {
     (void)d; (void)a; (void)n; (void)q; *size = sizeof(AudioObjectID);
+    if (!strcmp(mode(), "service-hang")) for (;;) pause();
     return !strcmp(mode(), "service-error") ? -77 : noErr;
 }
 static OSStatus AudioObjectGetPropertyData(AudioObjectID d,
     const AudioObjectPropertyAddress *a, UInt32 n, const void *q, UInt32 *size, void *out) {
     (void)d; (void)n; (void)size;
+    if (!strcmp(mode(), "lookup-hang")) for (;;) pause();
     if (!strcmp(mode(), "lookup-error")) return -88;
     if (a->selector == kAudioDevicePropertyDeviceIsAlive) {
+        if (!strcmp(mode(), "alive-hang")) for (;;) pause();
         if (!strcmp(mode(), "alive-error")) return -99;
         *(UInt32 *)out = strcmp(mode(), "dead") != 0;
         return noErr;
@@ -84,7 +95,7 @@ class DriverStateTests(unittest.TestCase):
         if not cc:
             raise RuntimeError('C compiler required for probe logic tests')
         subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unknown-pragmas',
-                        '-I' + str(cls.base), str(ROOT / 'callaudio/installer/nv_driver_state.c'),
+                        '-I' + str(cls.base), str(SOURCE),
                         '-o', str(cls.binary)], check=True, capture_output=True, text=True)
 
     @classmethod
@@ -92,8 +103,21 @@ class DriverStateTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def probe(self, expected, scenario):
-        return subprocess.run([str(self.binary), expected], env={'SCENARIO': scenario},
-                              capture_output=True, text=True, timeout=5).returncode
+        return self.run_probe(expected, scenario, 5).returncode
+
+    def run_probe(self, expected, scenario, timeout):
+        start = time.monotonic()
+        try:
+            p = subprocess.run([str(self.binary), expected], env={'SCENARIO': scenario},
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            RECORDS.append(dict(test=self.id(), expected=expected, scenario=scenario,
+                                outer_timeout=True, elapsed=time.monotonic() - start))
+            raise
+        RECORDS.append(dict(test=self.id(), expected=expected, scenario=scenario,
+                            rc=p.returncode, stdout=p.stdout, stderr=p.stderr,
+                            elapsed=time.monotonic() - start))
+        return p
 
     def test_present_requires_all_four_live_uids(self):
         self.assertEqual(self.probe('present', 'present'), 0)
@@ -121,6 +145,31 @@ class DriverStateTests(unittest.TestCase):
     def test_usage_error_is_not_success(self):
         self.assertEqual(self.probe('anything', 'present'), 2)
 
+    def test_blocked_hal_calls_have_real_process_deadline(self):
+        # Execute the unchanged production C, including its real five-second alarm.
+        for scenario in ['service-hang', 'lookup-hang', 'alive-hang']:
+            with self.subTest(scenario=scenario):
+                start = time.monotonic()
+                p = self.run_probe('present', scenario, 8)
+                elapsed = time.monotonic() - start
+                self.assertEqual(p.returncode, 124, p.stderr)
+                self.assertIn('five-second deadline', p.stderr)
+                self.assertGreaterEqual(elapsed, 4)
+                self.assertLess(elapsed, 8)
+
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--evidence', type=Path)
+    parser.add_argument('--probe-source', type=Path, default=SOURCE)
+    args, remaining = parser.parse_known_args()
+    SOURCE = args.probe_source.resolve()
+    suite = unittest.main(argv=[sys.argv[0], *remaining], verbosity=2, exit=False)
+    if args.evidence:
+        args.evidence.parent.mkdir(parents=True, exist_ok=True)
+        args.evidence.write_text(json.dumps(dict(
+            scope='Production C with synthetic HAL API, NOT Apple SDK/native acceptance',
+            probe_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
+            tests=suite.result.testsRun, failures=len(suite.result.failures),
+            errors=len(suite.result.errors), records=RECORDS), indent=2) + '\n')
+    sys.exit(not suite.result.wasSuccessful())
